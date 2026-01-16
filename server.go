@@ -30,18 +30,17 @@ type Server struct {
 	shouldExit bool
 	httpServer *http.Server
 	pendingMoves map[string]time.Time
+	changeLog  []FileChange // NOUVEAU: Log des modifications
 }
 
 func NewServer(customID string) *Server {
 	hostID := customID
 	if hostID == "" {
-		// Si pas d'ID personnalisé, demander à l'utilisateur
 		fmt.Print("🔑 Entrez un ID à 6 chiffres pour ce serveur: ")
 		reader := bufio.NewReader(os.Stdin)
 		input, _ := reader.ReadString('\n')
 		hostID = strings.TrimSpace(input)
 		
-		// Validation basique
 		if len(hostID) != 6 {
 			fmt.Println("⚠️  L'ID doit contenir exactement 6 caractères")
 			fmt.Print("🔑 Entrez un ID à 6 chiffres: ")
@@ -50,7 +49,7 @@ func NewServer(customID string) *Server {
 		}
 	}
 	
-	return &Server{
+	server := &Server{
 		HostID:  hostID,
 		Clients: make(map[*websocket.Conn]string),
 		Upgrader: websocket.Upgrader{
@@ -60,9 +59,15 @@ func NewServer(customID string) *Server {
 		knownFiles:   make(map[string]time.Time),
 		knownDirs:    make(map[string]time.Time),
 		pendingMoves: make(map[string]time.Time),
+		changeLog:    make([]FileChange, 0),
 		clientNum:    0,
 		shouldExit:   false,
 	}
+	
+	// Charger le log des modifications au démarrage
+	server.loadChangeLog()
+	
+	return server
 }
 
 func (s *Server) Start(port string) {
@@ -87,6 +92,9 @@ func (s *Server) Start(port string) {
 			if strings.TrimSpace(strings.ToLower(input)) == "x" {
 				fmt.Println("🛑 Arrêt du serveur...")
 				s.shouldExit = true
+				
+				// Sauvegarder le log avant de quitter
+				s.saveChangeLog()
 				
 				s.mu.Lock()
 				for client := range s.Clients {
@@ -139,6 +147,10 @@ func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
 				Message: "Connexion établie - Synchronisation en cours...",
 			})
 
+			// NOUVEAU: Appliquer le log des modifications au client
+			s.applyChangeLogToClient(ws)
+			
+			// Puis envoyer l'état actuel
 			s.sendAllFilesAndDirs(ws)
 			s.handleClientMessages(ws, clientName)
 
@@ -178,9 +190,73 @@ func (s *Server) handleClientMessages(ws *websocket.Conn, clientName string) {
 				fmt.Printf("📥 %s: %s fichier %s\n", clientName, msg.Op, msg.FileName)
 			}
 			
+			// Ajouter timestamp
+			msg.Timestamp = time.Now().Unix()
+			
 			s.applyChange(msg)
+			
+			// NOUVEAU: Logger la modification
+			s.logChange(msg)
+			
 			s.broadcastExcept(msg, ws)
 		}
+	}
+}
+
+// NOUVEAU: Logger les modifications
+func (s *Server) logChange(msg FileChange) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	
+	msg.Origin = "server" // Normaliser l'origine
+	s.changeLog = append(s.changeLog, msg)
+	
+	// Limiter le log à 1000 entrées (garder les plus récentes)
+	if len(s.changeLog) > 1000 {
+		s.changeLog = s.changeLog[len(s.changeLog)-1000:]
+	}
+	
+	// Sauvegarder périodiquement
+	go s.saveChangeLog()
+}
+
+// NOUVEAU: Sauvegarder le log
+func (s *Server) saveChangeLog() {
+	s.mu.Lock()
+	data, err := json.MarshalIndent(s.changeLog, "", "  ")
+	s.mu.Unlock()
+	
+	if err != nil {
+		return
+	}
+	
+	ioutil.WriteFile("spiraly_changelog.json", data, 0644)
+}
+
+// NOUVEAU: Charger le log
+func (s *Server) loadChangeLog() {
+	data, err := ioutil.ReadFile("spiraly_changelog.json")
+	if err != nil {
+		return
+	}
+	
+	json.Unmarshal(data, &s.changeLog)
+	fmt.Printf("📋 %d modifications chargées depuis le dernier arrêt\n", len(s.changeLog))
+}
+
+// NOUVEAU: Appliquer le log à un client qui se connecte
+func (s *Server) applyChangeLogToClient(ws *websocket.Conn) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	
+	if len(s.changeLog) == 0 {
+		return
+	}
+	
+	fmt.Printf("📋 Application de %d modifications au nouveau client\n", len(s.changeLog))
+	
+	for _, change := range s.changeLog {
+		ws.WriteJSON(change)
 	}
 }
 
@@ -205,6 +281,7 @@ func (s *Server) sendDirRecursive(ws *websocket.Conn, basePath, relPath string) 
 				Op:       "mkdir",
 				IsDir:    true,
 				Origin:   "server",
+				Timestamp: time.Now().Unix(),
 			})
 			s.sendDirRecursive(ws, basePath, filepath.Join(relPath, entry.Name()))
 		} else {
@@ -219,6 +296,7 @@ func (s *Server) sendDirRecursive(ws *websocket.Conn, basePath, relPath string) 
 				Content:  base64.StdEncoding.EncodeToString(data),
 				IsDir:    false,
 				Origin:   "server",
+				Timestamp: time.Now().Unix(),
 			})
 		}
 	}
@@ -278,18 +356,15 @@ func (s *Server) handleEvent(event fsnotify.Event) {
 		return
 	}
 
-	// Normaliser avec des slashes pour tous les OS
 	relPath = filepath.ToSlash(filepath.Clean(relPath))
 	
 	s.mu.Lock()
 	
-	// Vérifier si on doit ignorer cet événement
 	if until, exists := s.skipNext[relPath]; exists && time.Now().Before(until) {
 		s.mu.Unlock()
 		return
 	}
 	
-	// Vérifier si c'est un déplacement récent
 	if until, exists := s.pendingMoves[relPath]; exists && time.Now().Before(until) {
 		s.mu.Unlock()
 		return
@@ -302,15 +377,12 @@ func (s *Server) handleEvent(event fsnotify.Event) {
 
 	// CREATE
 	if event.Op&fsnotify.Create != 0 {
-		// Marquer comme potentiel déplacement
 		s.mu.Lock()
 		s.pendingMoves[relPath] = time.Now().Add(300 * time.Millisecond)
 		s.mu.Unlock()
 		
-		// Attendre pour détecter si c'est un move
 		time.Sleep(150 * time.Millisecond)
 		
-		// Revérifier que le fichier existe toujours
 		if _, err := os.Stat(event.Name); err != nil {
 			return
 		}
@@ -329,7 +401,9 @@ func (s *Server) handleEvent(event fsnotify.Event) {
 				Op:       "mkdir",
 				IsDir:    true,
 				Origin:   "server",
+				Timestamp: time.Now().Unix(),
 			}
+			s.logChange(msg)
 			s.broadcast(msg)
 			fmt.Println("📤 mkdir", relPath)
 		} else {
@@ -355,7 +429,9 @@ func (s *Server) handleEvent(event fsnotify.Event) {
 				Content:  base64.StdEncoding.EncodeToString(data),
 				IsDir:    false,
 				Origin:   "server",
+				Timestamp: time.Now().Unix(),
 			}
+			s.logChange(msg)
 			s.broadcast(msg)
 			fmt.Println("📤 create", relPath)
 		}
@@ -378,7 +454,9 @@ func (s *Server) handleEvent(event fsnotify.Event) {
 			Content:  base64.StdEncoding.EncodeToString(data),
 			IsDir:    false,
 			Origin:   "server",
+			Timestamp: time.Now().Unix(),
 		}
+		s.logChange(msg)
 		s.broadcast(msg)
 		fmt.Println("📤 write", relPath)
 	}
@@ -400,7 +478,9 @@ func (s *Server) handleEvent(event fsnotify.Event) {
 			Op:       "remove",
 			IsDir:    wasDir,
 			Origin:   "server",
+			Timestamp: time.Now().Unix(),
 		}
+		s.logChange(msg)
 		s.broadcast(msg)
 		fmt.Println("📤 remove", relPath)
 	}
@@ -427,7 +507,6 @@ func (s *Server) cleanPendingMoves() {
 }
 
 func (s *Server) applyChange(msg FileChange) {
-	// Normaliser le chemin reçu en chemin système
 	normalizedPath := filepath.FromSlash(msg.FileName)
 	path := filepath.Join(s.WatchDir, normalizedPath)
 
@@ -457,7 +536,8 @@ func (s *Server) applyChange(msg FileChange) {
 		
 	case "remove":
 		if msg.IsDir {
-			os.RemoveAll(path)
+			// NOUVEAU: Suppression robuste de dossier
+			forceRemoveAll(path)
 			s.mu.Lock()
 			delete(s.knownDirs, msg.FileName)
 			s.mu.Unlock()
@@ -542,8 +622,10 @@ func (s *Server) periodicCheck() {
 					Op:       "remove",
 					IsDir:    true,
 					Origin:   "server",
+					Timestamp: time.Now().Unix(),
 				}
 				delete(s.knownDirs, oldDir)
+				s.changeLog = append(s.changeLog, msg)
 				for c := range s.Clients {
 					c.WriteJSON(msg)
 				}
@@ -562,8 +644,10 @@ func (s *Server) periodicCheck() {
 					Op:       "remove",
 					IsDir:    false,
 					Origin:   "server",
+					Timestamp: time.Now().Unix(),
 				}
 				delete(s.knownFiles, oldFile)
+				s.changeLog = append(s.changeLog, msg)
 				for c := range s.Clients {
 					c.WriteJSON(msg)
 				}
@@ -582,8 +666,10 @@ func (s *Server) periodicCheck() {
 					Op:       "mkdir",
 					IsDir:    true,
 					Origin:   "server",
+					Timestamp: time.Now().Unix(),
 				}
 				s.knownDirs[newDir] = modTime
+				s.changeLog = append(s.changeLog, msg)
 				for c := range s.Clients {
 					c.WriteJSON(msg)
 				}
@@ -606,11 +692,13 @@ func (s *Server) periodicCheck() {
 						Content:  base64.StdEncoding.EncodeToString(data),
 						IsDir:    false,
 						Origin:   "server",
+						Timestamp: time.Now().Unix(),
 					}
 					for c := range s.Clients {
 						c.WriteJSON(msg)
 					}
 					s.knownFiles[name] = modTime
+					s.changeLog = append(s.changeLog, msg)
 					fmt.Println("📤 Fichier modifié:", name)
 				}
 			}

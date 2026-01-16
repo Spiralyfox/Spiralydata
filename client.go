@@ -27,6 +27,7 @@ type Client struct {
 	lastDirs    map[string]time.Time
 	scanRunning bool
 	shouldExit  bool
+	receivedChanges map[string]int64 // NOUVEAU: Track des changements reçus
 }
 
 func StartClient(addr string) {
@@ -36,12 +37,10 @@ func StartClient(addr string) {
 	var noConfig bool
 	var shouldSaveConfig bool
 
-	// Vérifier si une configuration existe
 	if ConfigExists() {
 		serverAddr, hostID, noConfig = ShowConfigMenu()
 		
 		if noConfig {
-			// Connexion sans configuration
 			fmt.Print("\n📡 Adresse serveur (IP:PORT): ")
 			addrInput, _ := reader.ReadString('\n')
 			serverAddr = strings.TrimSpace(addrInput)
@@ -51,10 +50,9 @@ func StartClient(addr string) {
 			hostID = strings.TrimSpace(id)
 		}
 	} else {
-		// Pas de configuration existante
-		fmt.Println("\n╔═════════════════════════════════════════╗")
+		fmt.Println("\n╔═══════════════════════════════════════╗")
 		fmt.Println("║     PREMIÈRE CONNEXION - SPIRALY       ║")
-		fmt.Println("╚═════════════════════════════════════════╝")
+		fmt.Println("╚═══════════════════════════════════════╝")
 		fmt.Print("\n💾 Voulez-vous sauvegarder cette configuration? (y/n): ")
 		
 		var saveChoice string
@@ -70,7 +68,6 @@ func StartClient(addr string) {
 		hostID = strings.TrimSpace(id)
 	}
 	
-	// Vérifier que serverAddr et hostID ne sont pas vides
 	if serverAddr == "" || hostID == "" {
 		fmt.Println("❌ Adresse serveur ou ID du host manquant!")
 		return
@@ -91,13 +88,12 @@ func StartClient(addr string) {
 			continue
 		}
 		
-		// Sauvegarder la config maintenant que la connexion a réussi (si demandé)
 		if shouldSaveConfig && !ConfigExists() {
 			if err := SaveConfig(serverAddr, hostID); err != nil {
 				fmt.Println("⚠️  Erreur de sauvegarde de la configuration:", err)
 			} else {
 				fmt.Println("✅ Configuration sauvegardée!")
-				shouldSaveConfig = false // Ne sauvegarder qu'une fois
+				shouldSaveConfig = false
 			}
 		}
 
@@ -150,9 +146,11 @@ func StartClient(addr string) {
 			lastState:  make(map[string]time.Time),
 			lastDirs:   make(map[string]time.Time),
 			shouldExit: false,
+			receivedChanges: make(map[string]int64),
 		}
 
-		client.scanInitial()
+		// MODIFIÉ: Ne scanner qu'après avoir reçu le changelog
+		// client.scanInitial() - déplacé après réception des messages initiaux
 
 		go func() {
 			for {
@@ -166,10 +164,18 @@ func StartClient(addr string) {
 			}
 		}()
 
-		client.syncLocalInitToHost()
-
-		go client.watchRecursive()
-		go client.periodicScanner()
+		// NOUVEAU: D'abord recevoir tous les changements du serveur
+		initialSyncDone := false
+		go func() {
+			time.Sleep(2 * time.Second) // Attendre que le changelog soit appliqué
+			if !initialSyncDone {
+				client.scanInitial()
+				client.syncLocalInitToHost()
+				go client.watchRecursive()
+				go client.periodicScanner()
+				initialSyncDone = true
+			}
+		}()
 
 		for {
 			var rawMsg json.RawMessage
@@ -185,6 +191,15 @@ func StartClient(addr string) {
 			if err := json.Unmarshal(rawMsg, &msg); err == nil {
 				if msg.Origin != "client" {
 					client.applyChange(msg)
+					
+					// Lancer la sync après les premiers messages
+					if !initialSyncDone && time.Now().Unix()-msg.Timestamp > 5 {
+						client.scanInitial()
+						client.syncLocalInitToHost()
+						go client.watchRecursive()
+						go client.periodicScanner()
+						initialSyncDone = true
+					}
 				}
 			}
 		}
@@ -226,7 +241,35 @@ func (c *Client) scanDirRecursive(basePath, relPath string) {
 }
 
 func (c *Client) syncLocalInitToHost() {
-	c.sendDirRecursive(c.localDir, "")
+	// MODIFIÉ: Ne plus envoyer les fichiers qui ont déjà été traités par le changelog
+	c.sendDirRecursiveSelective(c.localDir, "")
+}
+
+func (c *Client) sendDirRecursiveSelective(basePath, relPath string) {
+	fullPath := filepath.Join(basePath, relPath)
+	entries, _ := ioutil.ReadDir(fullPath)
+	
+	for _, entry := range entries {
+		itemRelPath := filepath.ToSlash(filepath.Join(relPath, entry.Name()))
+		
+		// NOUVEAU: Ne pas renvoyer si déjà dans le changelog reçu
+		if _, received := c.receivedChanges[itemRelPath]; received {
+			continue
+		}
+		
+		if entry.IsDir() {
+			c.ws.WriteJSON(FileChange{
+				FileName: itemRelPath,
+				Op:       "mkdir",
+				IsDir:    true,
+				Origin:   "client",
+				Timestamp: time.Now().Unix(),
+			})
+			c.sendDirRecursiveSelective(basePath, filepath.Join(relPath, entry.Name()))
+		} else {
+			c.sendFileNow(itemRelPath)
+		}
+	}
 }
 
 func (c *Client) sendDirRecursive(basePath, relPath string) {
@@ -242,6 +285,7 @@ func (c *Client) sendDirRecursive(basePath, relPath string) {
 				Op:       "mkdir",
 				IsDir:    true,
 				Origin:   "client",
+				Timestamp: time.Now().Unix(),
 			})
 			c.sendDirRecursive(basePath, filepath.Join(relPath, entry.Name()))
 		} else {
@@ -324,6 +368,7 @@ func (c *Client) periodicScanner() {
 					Op:       "remove",
 					IsDir:    true,
 					Origin:   "client",
+					Timestamp: time.Now().Unix(),
 				})
 				delete(c.knownDirs, oldDir)
 			}
@@ -341,6 +386,7 @@ func (c *Client) periodicScanner() {
 					Op:       "mkdir",
 					IsDir:    true,
 					Origin:   "client",
+					Timestamp: time.Now().Unix(),
 				})
 				c.knownDirs[newDir] = modTime
 			}
@@ -374,6 +420,7 @@ func (c *Client) periodicScanner() {
 					Op:       "remove",
 					IsDir:    false,
 					Origin:   "client",
+					Timestamp: time.Now().Unix(),
 				})
 				delete(c.knownFiles, oldFile)
 			}
@@ -417,17 +464,18 @@ func (c *Client) sendFileNow(relPath string) {
 		Content:  base64.StdEncoding.EncodeToString(data),
 		IsDir:    false,
 		Origin:   "client",
+		Timestamp: time.Now().Unix(),
 	})
 	c.knownFiles[relPath] = time.Now()
 }
 
 func (c *Client) applyChange(msg FileChange) {
-	// Normaliser le chemin reçu en chemin système
 	normalizedPath := filepath.FromSlash(msg.FileName)
 	target := filepath.Join(c.localDir, normalizedPath)
 
 	c.mu.Lock()
 	c.skipNext[msg.FileName] = time.Now().Add(3 * time.Second)
+	c.receivedChanges[msg.FileName] = msg.Timestamp // NOUVEAU: Tracker
 	c.mu.Unlock()
 
 	switch msg.Op {
@@ -441,7 +489,8 @@ func (c *Client) applyChange(msg FileChange) {
 		
 	case "remove":
 		if msg.IsDir {
-			os.RemoveAll(target)
+			// NOUVEAU: Suppression robuste
+			forceRemoveAll(target)
 			c.mu.Lock()
 			delete(c.knownDirs, msg.FileName)
 			delete(c.lastDirs, msg.FileName)
@@ -457,7 +506,6 @@ func (c *Client) applyChange(msg FileChange) {
 		}
 		
 	case "create", "write":
-		// Créer le dossier parent si nécessaire
 		dir := filepath.Dir(target)
 		os.MkdirAll(dir, 0755)
 		
