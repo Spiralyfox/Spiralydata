@@ -197,7 +197,7 @@ func (s *Server) sendDirRecursive(ws *websocket.Conn, basePath, relPath string) 
 	}
 
 	for _, entry := range entries {
-		itemRelPath := filepath.Join(relPath, entry.Name())
+		itemRelPath := filepath.ToSlash(filepath.Join(relPath, entry.Name()))
 		
 		if entry.IsDir() {
 			ws.WriteJSON(FileChange{
@@ -206,9 +206,9 @@ func (s *Server) sendDirRecursive(ws *websocket.Conn, basePath, relPath string) 
 				IsDir:    true,
 				Origin:   "server",
 			})
-			s.sendDirRecursive(ws, basePath, itemRelPath)
+			s.sendDirRecursive(ws, basePath, filepath.Join(relPath, entry.Name()))
 		} else {
-			fullFilePath := filepath.Join(basePath, itemRelPath)
+			fullFilePath := filepath.Join(basePath, relPath, entry.Name())
 			data, err := readFileWithRetry(fullFilePath)
 			if err != nil {
 				continue
@@ -278,7 +278,8 @@ func (s *Server) handleEvent(event fsnotify.Event) {
 		return
 	}
 
-	relPath = filepath.Clean(relPath)
+	// Normaliser avec des slashes pour tous les OS
+	relPath = filepath.ToSlash(filepath.Clean(relPath))
 	
 	s.mu.Lock()
 	
@@ -426,7 +427,9 @@ func (s *Server) cleanPendingMoves() {
 }
 
 func (s *Server) applyChange(msg FileChange) {
-	path := filepath.Join(s.WatchDir, msg.FileName)
+	// Normaliser le chemin reçu en chemin système
+	normalizedPath := filepath.FromSlash(msg.FileName)
+	path := filepath.Join(s.WatchDir, normalizedPath)
 
 	s.mu.Lock()
 	s.skipNext[msg.FileName] = time.Now().Add(3 * time.Second)
@@ -502,11 +505,11 @@ func (s *Server) scanDirRecursive(basePath, relPath string) {
 	}
 
 	for _, entry := range entries {
-		itemRelPath := filepath.Join(relPath, entry.Name())
+		itemRelPath := filepath.ToSlash(filepath.Join(relPath, entry.Name()))
 		
 		if entry.IsDir() {
 			s.knownDirs[itemRelPath] = entry.ModTime()
-			s.scanDirRecursive(basePath, itemRelPath)
+			s.scanDirRecursive(basePath, filepath.Join(relPath, entry.Name()))
 		} else {
 			s.knownFiles[itemRelPath] = entry.ModTime()
 		}
@@ -624,11 +627,11 @@ func (s *Server) scanCurrentState(basePath, relPath string, files map[string]tim
 	}
 
 	for _, entry := range entries {
-		itemRelPath := filepath.Join(relPath, entry.Name())
+		itemRelPath := filepath.ToSlash(filepath.Join(relPath, entry.Name()))
 		
 		if entry.IsDir() {
 			dirs[itemRelPath] = entry.ModTime()
-			s.scanCurrentState(basePath, itemRelPath, files, dirs)
+			s.scanCurrentState(basePath, filepath.Join(relPath, entry.Name()), files, dirs)
 		} else {
 			files[itemRelPath] = entry.ModTime()
 		}

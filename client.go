@@ -52,9 +52,9 @@ func StartClient(addr string) {
 		}
 	} else {
 		// Pas de configuration existante
-		fmt.Println("\n╔════════════════════════════════════════╗")
+		fmt.Println("\n╔═════════════════════════════════════════╗")
 		fmt.Println("║     PREMIÈRE CONNEXION - SPIRALY       ║")
-		fmt.Println("╚════════════════════════════════════════╝")
+		fmt.Println("╚═════════════════════════════════════════╝")
 		fmt.Print("\n💾 Voulez-vous sauvegarder cette configuration? (y/n): ")
 		
 		var saveChoice string
@@ -77,7 +77,7 @@ func StartClient(addr string) {
 	}
 
 	for {
-		fmt.Println("\n🔌 Tentative de connexion à", serverAddr, "...")
+		fmt.Println("\n🔌 Tentative de connexion à ", serverAddr, "...")
 		ws, _, err := websocket.DefaultDialer.Dial("ws://"+serverAddr+"/ws", nil)
 		if err != nil {
 			fmt.Println("❌ Connexion impossible:", err)
@@ -212,12 +212,12 @@ func (c *Client) scanDirRecursive(basePath, relPath string) {
 	entries, _ := ioutil.ReadDir(fullPath)
 	
 	for _, entry := range entries {
-		itemRelPath := filepath.Join(relPath, entry.Name())
+		itemRelPath := filepath.ToSlash(filepath.Join(relPath, entry.Name()))
 		
 		if entry.IsDir() {
 			c.lastDirs[itemRelPath] = entry.ModTime()
 			c.knownDirs[itemRelPath] = entry.ModTime()
-			c.scanDirRecursive(basePath, itemRelPath)
+			c.scanDirRecursive(basePath, filepath.Join(relPath, entry.Name()))
 		} else {
 			c.lastState[itemRelPath] = entry.ModTime()
 			c.knownFiles[itemRelPath] = entry.ModTime()
@@ -234,7 +234,7 @@ func (c *Client) sendDirRecursive(basePath, relPath string) {
 	entries, _ := ioutil.ReadDir(fullPath)
 	
 	for _, entry := range entries {
-		itemRelPath := filepath.Join(relPath, entry.Name())
+		itemRelPath := filepath.ToSlash(filepath.Join(relPath, entry.Name()))
 		
 		if entry.IsDir() {
 			c.ws.WriteJSON(FileChange{
@@ -243,7 +243,7 @@ func (c *Client) sendDirRecursive(basePath, relPath string) {
 				IsDir:    true,
 				Origin:   "client",
 			})
-			c.sendDirRecursive(basePath, itemRelPath)
+			c.sendDirRecursive(basePath, filepath.Join(relPath, entry.Name()))
 		} else {
 			c.sendFileNow(itemRelPath)
 		}
@@ -393,11 +393,11 @@ func (c *Client) scanCurrentState(basePath, relPath string, files map[string]tim
 	}
 
 	for _, entry := range entries {
-		itemRelPath := filepath.Join(relPath, entry.Name())
+		itemRelPath := filepath.ToSlash(filepath.Join(relPath, entry.Name()))
 		
 		if entry.IsDir() {
 			dirs[itemRelPath] = entry.ModTime()
-			c.scanCurrentState(basePath, itemRelPath, files, dirs)
+			c.scanCurrentState(basePath, filepath.Join(relPath, entry.Name()), files, dirs)
 		} else {
 			files[itemRelPath] = entry.ModTime()
 		}
@@ -405,7 +405,7 @@ func (c *Client) scanCurrentState(basePath, relPath string, files map[string]tim
 }
 
 func (c *Client) sendFileNow(relPath string) {
-	fullPath := filepath.Join(c.localDir, relPath)
+	fullPath := filepath.Join(c.localDir, filepath.FromSlash(relPath))
 	data, err := ioutil.ReadFile(fullPath)
 	if err != nil {
 		return
@@ -422,7 +422,9 @@ func (c *Client) sendFileNow(relPath string) {
 }
 
 func (c *Client) applyChange(msg FileChange) {
-	target := filepath.Join(c.localDir, msg.FileName)
+	// Normaliser le chemin reçu en chemin système
+	normalizedPath := filepath.FromSlash(msg.FileName)
+	target := filepath.Join(c.localDir, normalizedPath)
 
 	c.mu.Lock()
 	c.skipNext[msg.FileName] = time.Now().Add(3 * time.Second)
