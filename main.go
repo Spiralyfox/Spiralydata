@@ -23,7 +23,7 @@ func main() {
 		port, _ := reader.ReadString('\n')
 		port = strings.TrimSpace(port)
 
-		server := NewServer()
+		server := NewServer("")
 		server.Start(port)
 	}
 
@@ -83,7 +83,7 @@ func showInteractiveMenu() {
 		port, _ := reader.ReadString('\n')
 		port = strings.TrimSpace(port)
 
-		server := NewServer()
+		server := NewServer("")
 		server.Start(port)
 
 	case "3":

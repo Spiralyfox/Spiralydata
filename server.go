@@ -6,7 +6,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"io/ioutil"
-	"math/rand"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -30,21 +29,39 @@ type Server struct {
 	clientNum  int
 	shouldExit bool
 	httpServer *http.Server
+	pendingMoves map[string]time.Time
 }
 
-func NewServer() *Server {
-	rand.Seed(time.Now().UnixNano())
+func NewServer(customID string) *Server {
+	hostID := customID
+	if hostID == "" {
+		// Si pas d'ID personnalisé, demander à l'utilisateur
+		fmt.Print("🔑 Entrez un ID à 6 chiffres pour ce serveur: ")
+		reader := bufio.NewReader(os.Stdin)
+		input, _ := reader.ReadString('\n')
+		hostID = strings.TrimSpace(input)
+		
+		// Validation basique
+		if len(hostID) != 6 {
+			fmt.Println("⚠️  L'ID doit contenir exactement 6 caractères")
+			fmt.Print("🔑 Entrez un ID à 6 chiffres: ")
+			input, _ = reader.ReadString('\n')
+			hostID = strings.TrimSpace(input)
+		}
+	}
+	
 	return &Server{
-		HostID:  fmt.Sprintf("%06d", rand.Intn(1000000)),
+		HostID:  hostID,
 		Clients: make(map[*websocket.Conn]string),
 		Upgrader: websocket.Upgrader{
 			CheckOrigin: func(r *http.Request) bool { return true },
 		},
-		skipNext:   make(map[string]time.Time),
-		knownFiles: make(map[string]time.Time),
-		knownDirs:  make(map[string]time.Time),
-		clientNum:  0,
-		shouldExit: false,
+		skipNext:     make(map[string]time.Time),
+		knownFiles:   make(map[string]time.Time),
+		knownDirs:    make(map[string]time.Time),
+		pendingMoves: make(map[string]time.Time),
+		clientNum:    0,
+		shouldExit:   false,
 	}
 }
 
@@ -61,6 +78,7 @@ func (s *Server) Start(port string) {
 	s.updateKnownFilesAndDirs()
 	go s.watchRecursive()
 	go s.periodicCheck()
+	go s.cleanPendingMoves()
 
 	go func() {
 		reader := bufio.NewReader(os.Stdin)
@@ -167,7 +185,6 @@ func (s *Server) handleClientMessages(ws *websocket.Conn, clientName string) {
 }
 
 func (s *Server) sendAllFilesAndDirs(ws *websocket.Conn) {
-	// Envoyer récursivement tous les dossiers et fichiers
 	s.sendDirRecursive(ws, s.WatchDir, "")
 	fmt.Println("📤 Structure complète envoyée")
 }
@@ -183,17 +200,14 @@ func (s *Server) sendDirRecursive(ws *websocket.Conn, basePath, relPath string) 
 		itemRelPath := filepath.Join(relPath, entry.Name())
 		
 		if entry.IsDir() {
-			// Envoyer la création du dossier
 			ws.WriteJSON(FileChange{
 				FileName: itemRelPath,
 				Op:       "mkdir",
 				IsDir:    true,
 				Origin:   "server",
 			})
-			// Puis son contenu récursivement
 			s.sendDirRecursive(ws, basePath, itemRelPath)
 		} else {
-			// Envoyer le fichier
 			fullFilePath := filepath.Join(basePath, itemRelPath)
 			data, err := readFileWithRetry(fullFilePath)
 			if err != nil {
@@ -218,7 +232,6 @@ func (s *Server) watchRecursive() {
 	}
 	defer watcher.Close()
 
-	// Ajouter le dossier principal et tous les sous-dossiers
 	s.addDirToWatcher(watcher, s.WatchDir)
 
 	for {
@@ -229,7 +242,6 @@ func (s *Server) watchRecursive() {
 		case event := <-watcher.Events:
 			s.handleEvent(event)
 			
-			// Si un nouveau dossier est créé, l'ajouter au watcher
 			if event.Op&fsnotify.Create != 0 {
 				if info, err := os.Stat(event.Name); err == nil && info.IsDir() {
 					watcher.Add(event.Name)
@@ -261,39 +273,81 @@ func (s *Server) addDirToWatcher(watcher *fsnotify.Watcher, dir string) {
 }
 
 func (s *Server) handleEvent(event fsnotify.Event) {
-	relPath, _ := filepath.Rel(s.WatchDir, event.Name)
-	if relPath == "." {
+	relPath, err := filepath.Rel(s.WatchDir, event.Name)
+	if err != nil || relPath == "." {
 		return
 	}
 
+	relPath = filepath.Clean(relPath)
+	
 	s.mu.Lock()
+	
+	// Vérifier si on doit ignorer cet événement
 	if until, exists := s.skipNext[relPath]; exists && time.Now().Before(until) {
 		s.mu.Unlock()
 		return
 	}
+	
+	// Vérifier si c'est un déplacement récent
+	if until, exists := s.pendingMoves[relPath]; exists && time.Now().Before(until) {
+		s.mu.Unlock()
+		return
+	}
+	
 	s.mu.Unlock()
 
 	info, err := os.Stat(event.Name)
 	isDir := err == nil && info.IsDir()
 
+	// CREATE
 	if event.Op&fsnotify.Create != 0 {
+		// Marquer comme potentiel déplacement
+		s.mu.Lock()
+		s.pendingMoves[relPath] = time.Now().Add(300 * time.Millisecond)
+		s.mu.Unlock()
+		
+		// Attendre pour détecter si c'est un move
+		time.Sleep(150 * time.Millisecond)
+		
+		// Revérifier que le fichier existe toujours
+		if _, err := os.Stat(event.Name); err != nil {
+			return
+		}
+		
 		if isDir {
+			s.mu.Lock()
+			if _, known := s.knownDirs[relPath]; known {
+				s.mu.Unlock()
+				return
+			}
+			s.knownDirs[relPath] = time.Now()
+			s.mu.Unlock()
+			
 			msg := FileChange{
 				FileName: relPath,
 				Op:       "mkdir",
 				IsDir:    true,
 				Origin:   "server",
 			}
-			s.mu.Lock()
-			s.knownDirs[relPath] = time.Now()
-			s.mu.Unlock()
 			s.broadcast(msg)
 			fmt.Println("📤 mkdir", relPath)
 		} else {
+			s.mu.Lock()
+			if _, known := s.knownFiles[relPath]; known {
+				s.mu.Unlock()
+				return
+			}
+			s.mu.Unlock()
+			
 			data, err := readFileWithRetry(event.Name)
 			if err != nil {
 				return
 			}
+			
+			s.mu.Lock()
+			s.knownFiles[relPath] = time.Now()
+			s.mu.Unlock()
+			
 			msg := FileChange{
 				FileName: relPath,
 				Op:       "create",
@@ -301,19 +355,22 @@ func (s *Server) handleEvent(event fsnotify.Event) {
 				IsDir:    false,
 				Origin:   "server",
 			}
-			s.mu.Lock()
-			s.knownFiles[relPath] = time.Now()
-			s.mu.Unlock()
 			s.broadcast(msg)
 			fmt.Println("📤 create", relPath)
 		}
 	}
 
+	// WRITE
 	if event.Op&fsnotify.Write != 0 && !isDir {
 		data, err := readFileWithRetry(event.Name)
 		if err != nil {
 			return
 		}
+		
+		s.mu.Lock()
+		s.knownFiles[relPath] = time.Now()
+		s.mu.Unlock()
+		
 		msg := FileChange{
 			FileName: relPath,
 			Op:       "write",
@@ -321,29 +378,50 @@ func (s *Server) handleEvent(event fsnotify.Event) {
 			IsDir:    false,
 			Origin:   "server",
 		}
-		s.mu.Lock()
-		s.knownFiles[relPath] = time.Now()
-		s.mu.Unlock()
 		s.broadcast(msg)
 		fmt.Println("📤 write", relPath)
 	}
 
+	// REMOVE
 	if event.Op&fsnotify.Remove != 0 {
-		msg := FileChange{
-			FileName: relPath,
-			Op:       "remove",
-			IsDir:    isDir,
-			Origin:   "server",
-		}
 		s.mu.Lock()
-		if isDir {
+		wasDir := s.knownDirs[relPath] != time.Time{}
+		
+		if wasDir {
 			delete(s.knownDirs, relPath)
 		} else {
 			delete(s.knownFiles, relPath)
 		}
 		s.mu.Unlock()
+		
+		msg := FileChange{
+			FileName: relPath,
+			Op:       "remove",
+			IsDir:    wasDir,
+			Origin:   "server",
+		}
 		s.broadcast(msg)
 		fmt.Println("📤 remove", relPath)
+	}
+}
+
+func (s *Server) cleanPendingMoves() {
+	ticker := time.NewTicker(500 * time.Millisecond)
+	defer ticker.Stop()
+	
+	for range ticker.C {
+		if s.shouldExit {
+			return
+		}
+		
+		s.mu.Lock()
+		now := time.Now()
+		for path, until := range s.pendingMoves {
+			if now.After(until) {
+				delete(s.pendingMoves, path)
+			}
+		}
+		s.mu.Unlock()
 	}
 }
 
@@ -362,7 +440,6 @@ func (s *Server) applyChange(msg FileChange) {
 		s.mu.Unlock()
 		
 	case "create", "write":
-		// Créer le dossier parent si nécessaire
 		dir := filepath.Dir(path)
 		os.MkdirAll(dir, 0755)
 		
