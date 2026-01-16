@@ -1,93 +1,341 @@
-===============================
-      Spiralydata
-===============================
+# Spiralydata
 
-Spiralydata est un logiciel de synchronisation de fichiers en temps réel 
-entre plusieurs machines via une connexion réseau locale ou Internet. 
-Il permet à un ou plusieurs utilisateurs de se connecter à un serveur 
-(hôte) et de partager automatiquement des fichiers dans un dossier spécifique.
+Spiralydata is a real-time file synchronization software that allows multiple users to share and sync files across different machines over local network or Internet.
 
---------------------------------------------------------------------------------
-Fonctionnalités principales :
+## Table of Contents
 
-1. Synchronisation bidirectionnelle :
-   - Les fichiers ajoutés, modifiés ou supprimés sont automatiquement 
-     synchronisés entre le client et le serveur.
-   - Détection des renommages de fichiers pour éviter les doublons.
+- [Features](#features)
+- [Requirements](#requirements)
+- [Installation](#installation)
+- [Quick Start](#quick-start)
+- [Usage](#usage)
+  - [Host Mode](#host-mode)
+  - [User Mode](#user-mode)
+  - [Configuration Management](#configuration-management)
+- [Architecture](#architecture)
+- [How It Works](#how-it-works)
+- [Network Setup](#network-setup)
+- [Project Structure](#project-structure)
+- [Support](#support)
 
-2. Multi-utilisateur :
-   - Plusieurs clients peuvent se connecter au même serveur.
-   - Chaque client est isolé mais reçoit les mises à jour en temps réel.
+## Features
 
-3. Authentification par ID :
-   - Chaque serveur génère un ID unique (6 chiffres).
-   - Les clients doivent fournir cet ID pour se connecter.
-   - Tentative échouée si l’ID est incorrect, avec possibilité de réessayer.
+### Bidirectional Synchronization
+- Files added, modified, or deleted are automatically synchronized between client and server
+- Real-time change detection using filesystem watchers
+- Periodic scanning to catch missed changes
 
-4. Robustesse :
-   - Scanner périodique pour rattraper les fichiers manqués.
-   - Gestion des suppressions et modifications simultanées.
-   - Protection contre les boucles d’envoi (évite les doubles synchronisations).
+### Multi-User Support
+- Multiple clients can connect to the same host simultaneously
+- Each client receives updates in real-time
+- Isolated client sessions with shared data space
 
-5. Cross-platform :
-   - Fonctionne sur Windows et Linux.
-   - Développé en Go pour exécutions rapides et portables.
+### Authentication System
+- Each server generates a unique 6-digit ID
+- Clients must provide the correct ID to connect
+- Failed authentication attempts allow retry without restarting
 
---------------------------------------------------------------------------------
-Installation et setup :
+### Robustness
+- Periodic scanner to catch any missed file changes
+- Handles simultaneous modifications and deletions
+- Protection against synchronization loops
+- Automatic retry mechanism for file operations
 
-Prérequis :
-- Go installé (https://golang.org/doc/install)
-- Windows 10/11 ou Linux Ubuntu 20.04+
-- Accès réseau entre clients et serveur
+### Portable
+- Single executable file can be placed anywhere
+- Automatically creates synchronization folder next to executable
+- Configuration file stored with executable
+- No installation required
 
-1. Télécharger le projet depuis GitHub :
+### Cross-Platform
+- Works on Windows and Linux
+- Developed in Go for fast and portable execution
+- Consistent behavior across operating systems
 
-   git clone https://github.com/Spiralyfox/Spiralydata.git
-   cd Spiralydata
+## Requirements
 
-2. Lancez le setup (Windows ou Linux)
+- Go 1.16 or higher (for compilation only)
+- Network connectivity between host and clients
+- Port forwarding configured for Internet access (optional)
 
-3. Lancer le logiciel :
+### Supported Operating Systems
+- Windows 10/11
+- Linux (Ubuntu 20.04+, Debian, Fedora, Arch, etc.)
+- macOS (experimental)
 
-   Un .exe sera compilé (et une version Linux)
+## Installation
 
-   ⚠️ Important : Si vous voulez que des clients sur Internet 
-   se connectent, configurez la **redirection de port** sur votre box 
-   pour que le port choisi pointe vers votre machine hôte.
+### From Source
 
-4. Arrêter le programme :
-   - Tapez `x` puis Entrée dans la console pour arrêter le serveur ou le client.
+1. Clone the repository:
+```bash
+git clone https://github.com/Spiralyfox/Spiralydata.git
+cd Spiralydata/source_code
+```
 
---------------------------------------------------------------------------------
-Structure du projet :
+2. Install dependencies:
+```bash
+go mod download
+```
 
-- client.go          : code client
-- server.go          : code serveur
-- main.go            : gestion du mode host/client
-- types.go           : structures de données (FileChange etc.)
-- utils.go           : fonctions utilitaires
-- config.go          : configurations globales
-- setup_linux.sh     : script d’installation Linux
-- setup_windows.bat  : script d’installation Windows
-- Spiralydata        : dossier synchronisé par défaut
+3. Compile the project:
 
---------------------------------------------------------------------------------
-Notes importantes :
+**On Windows:**
+```batch
+setup_windows.bat
+```
 
-- Le dossier par défaut pour la synchronisation est `./Spiralydata`.
-- Les clients doivent avoir une connexion stable au serveur pour une synchronisation efficace.
-- En cas de modification simultanée d’un même fichier, la dernière modification détectée sera appliquée.
-- L’authentification via ID garantit que seuls les clients autorisés peuvent se connecter.
-- Pour un usage sur Internet, assurez-vous que le port choisi est ouvert et redirigé correctement sur votre box/routeur.
+**On Linux/Mac:**
+```bash
+chmod +x setup_linux.sh
+./setup_linux.sh
+```
 
---------------------------------------------------------------------------------
-Support :
+This will generate:
+- `spiralydata.exe` (Windows executable)
+- `spiralydata` (Linux/Mac executable)
 
-Pour toute question ou problème :
-- Pseudo : Spiralyfox
-- Email : dauriacmatteo@gmail.com
-- GitHub : https://github.com/Spiralyfox/Spiralydata
+### From Pre-compiled Binaries
 
---------------------------------------------------------------------------------
-Merci d’utiliser Spiralydata !
+Download the latest release from the [Releases](https://github.com/Spiralyfox/Spiralydata/releases) page and extract the executable for your platform.
+
+## Quick Start
+
+### As Host (Server)
+
+1. Run the executable
+2. Select "Host" mode
+3. Enter a port number (e.g., 1234)
+4. Create and remember a 6-digit ID
+5. Share this ID with users who want to connect
+
+### As User (Client)
+
+1. Run the executable
+2. Select "User" mode
+3. Enter server address (IP:PORT)
+4. Enter the 6-digit host ID
+5. Synchronization starts automatically
+
+## Usage
+
+### Host Mode
+
+The host mode runs a WebSocket server that clients connect to. All files in the `Spiralydata` folder are synchronized with connected clients.
+
+**Starting a host:**
+```
+1. Run spiralydata executable
+2. Choose option 2 (Host)
+3. Enter port (example: 1234)
+4. Enter 6-digit ID (example: 123456)
+```
+
+**Server output:**
+```
+Server started
+ID: 123456
+Folder: /path/to/Spiralydata
+Waiting for connections...
+
+Type 'x' then Enter to stop the server
+```
+
+**When a client connects:**
+```
+Client_1 connected (ID verified)
+Connected clients: 1
+Complete structure sent
+```
+
+### User Mode
+
+The user mode connects to a host server and synchronizes the local `Spiralydata` folder.
+
+**Connecting to a host:**
+```
+1. Run spiralydata executable
+2. Choose option 1 (User)
+3. Enter server address (example: 192.168.1.100:1234)
+4. Enter host ID (example: 123456)
+```
+
+**Client output:**
+```
+Attempting connection to 192.168.1.100:1234...
+Connection established - Synchronization in progress...
+Connected to host 123456
+Server: 192.168.1.100:1234
+
+Type 'x' then Enter to disconnect
+```
+
+### Configuration Management
+
+Spiralydata supports saving connection configurations for quick reconnection.
+
+**Configuration menu:**
+```
+1. Load existing configuration
+2. Create new configuration
+3. Change host ID in configuration
+4. Delete configuration
+5. Connect without configuration
+```
+
+**Configuration file location:**
+The `spiraly_config.json` file is created in the same directory as the executable.
+
+**Configuration format:**
+```json
+{
+  "server_addr": "192.168.1.100:1234",
+  "host_id": "123456"
+}
+```
+
+## Architecture
+
+### System Overview
+
+```
+Host (Server)                    Client (User)
++------------------+            +------------------+
+|  spiralydata     |            |  spiralydata     |
+|                  |            |                  |
+|  WebSocket       |<---------->|  WebSocket       |
+|  Server          |            |  Client          |
+|                  |            |                  |
+|  File Watcher    |            |  File Watcher    |
+|  Scanner         |            |  Scanner         |
+|                  |            |                  |
+|  /Spiralydata/   |            |  /Spiralydata/   |
++------------------+            +------------------+
+```
+
+### Components
+
+**Server (server.go):**
+- WebSocket server for client connections
+- File system watcher for real-time changes
+- Periodic scanner for missed changes
+- Client authentication and management
+- Broadcast system for multi-client updates
+
+**Client (client.go):**
+- WebSocket client for server connection
+- File system watcher for local changes
+- Periodic scanner for missed changes
+- Authentication handler
+- Configuration management
+
+**Common:**
+- `types.go`: Data structures (FileChange, AuthRequest, AuthResponse)
+- `utils.go`: Helper functions (file retry, executable directory)
+- `config.go`: Configuration file management
+- `main.go`: Entry point and menu system
+
+## How It Works
+
+### File Synchronization Process
+
+1. **Initial Sync:**
+   - When a client connects, the server sends the complete directory structure
+   - Client receives all files and folders
+   - Both systems are now in sync
+
+2. **Real-time Changes:**
+   - File system watchers detect changes immediately
+   - Changes are encoded and sent via WebSocket
+   - Receiving side applies the change locally
+   - Change is marked to skip next scan (prevents loops)
+
+3. **Periodic Scanning:**
+   - Every 2 seconds, both client and server scan their folders
+   - New, modified, or deleted files are detected
+   - Missing changes are synchronized
+   - Ensures consistency even if watcher misses events
+
+### Change Types
+
+- **create**: New file added
+- **write**: Existing file modified
+- **remove**: File or folder deleted
+- **mkdir**: New folder created
+
+### Conflict Resolution
+
+- Last write wins: Most recent change takes precedence
+- No version control: Previous versions are not saved
+- No merge strategy: Simultaneous edits result in last-write-wins
+
+## Network Setup
+
+### Local Network (LAN)
+
+Clients and host must be on the same network or have direct network access.
+
+**Example:**
+- Host IP: 192.168.1.100
+- Host Port: 1234
+- Client connects to: 192.168.1.100:1234
+
+### Internet (WAN)
+
+For Internet access, port forwarding must be configured on the host's router.
+
+**Steps:**
+1. Find your public IP address (whatismyip.com)
+2. Configure port forwarding on your router:
+   - External port: 1234 (or chosen port)
+   - Internal IP: Host machine IP
+   - Internal port: 1234 (same as chosen port)
+   - Protocol: TCP
+3. Share your public IP and port with clients
+
+**Example:**
+- Public IP: 203.0.113.45
+- Port: 1234
+- Client connects to: 203.0.113.45:1234
+
+**Security Note:** Only share your host ID with trusted users. Anyone with the ID can access your synchronized files.
+
+## Project Structure
+
+```
+Spiralydata/
+├── source_code/
+│   ├── main.go              # Entry point and interactive menu
+│   ├── server.go            # Server (host) implementation
+│   ├── client.go            # Client (user) implementation
+│   ├── types.go             # Data structures and types
+│   ├── utils.go             # Utility functions
+│   ├── config.go            # Configuration management
+│   ├── setup_windows.bat    # Windows compilation script
+│   ├── setup_linux.sh       # Linux compilation script
+│   ├── go.mod               # Go module definition
+│   └── .gitignore           # Git ignore rules
+├── README.md                # This file
+└── LICENSE                  # License information
+```
+
+### File Descriptions
+
+- **main.go**: Interactive menu system, mode selection (host/user)
+- **server.go**: WebSocket server, client management, file broadcasting
+- **client.go**: WebSocket client, server connection, local synchronization
+- **types.go**: FileChange, AuthRequest, AuthResponse structures
+- **utils.go**: File retry logic, executable directory detection
+- **config.go**: JSON configuration save/load/delete functions
+
+## Support
+
+For questions, issues, or feature requests:
+
+- **GitHub Issues:** [https://github.com/Spiralyfox/Spiralydata/issues](https://github.com/Spiralyfox/Spiralydata/issues)
+- **Email:** dauriacmatteo@gmail.com
+- **Author:** Spiralyfox
+
+---
+
+Thank you for using Spiralydata!
