@@ -14,25 +14,31 @@ import (
 )
 
 type Client struct {
-	ws               *websocket.Conn
-	localDir         string
-	mu               sync.Mutex
-	skipNext         map[string]time.Time
-	knownFiles       map[string]time.Time
-	knownDirs        map[string]time.Time
-	lastState        map[string]time.Time
-	lastDirs         map[string]time.Time
-	scanRunning      bool
-	shouldExit       bool
-	autoSync         bool
-	localChanges     []FileChange
-	connectionTime   time.Time
-	isProcessing     bool
-	watcherActive    bool
-	pendingChanges   []FileChange
-	pendingMu        sync.Mutex
+	ws                 *websocket.Conn
+	localDir           string
+	mu                 sync.Mutex
+	skipNext           map[string]time.Time
+	knownFiles         map[string]time.Time
+	knownDirs          map[string]time.Time
+	lastState          map[string]time.Time
+	lastDirs           map[string]time.Time
+	scanRunning        bool
+	shouldExit         bool
+	autoSync           bool
+	localChanges       []FileChange
+	connectionTime     time.Time
+	isProcessing       bool
+	watcherActive      bool
+	pendingChanges     []FileChange
+	pendingMu          sync.Mutex
 	filesReceivedCount int
-	lastLogTime      time.Time
+	lastLogTime        time.Time
+	
+	// Canaux pour l'explorateur et le téléchargement
+	explorerActive     bool
+	treeItemsChan      chan FileTreeItemMessage
+	downloadActive     bool
+	downloadChan       chan FileChange
 }
 
 func StartClientGUI(serverAddr, hostID, syncDir string, stopAnimation, connectionSuccess *bool, loadingLabel, statusLabel, infoLabel *widget.Label, client **Client) {
@@ -165,9 +171,11 @@ func StartClientGUI(serverAddr, hostID, syncDir string, stopAnimation, connectio
 		pendingChanges:     []FileChange{},
 		filesReceivedCount: 0,
 		lastLogTime:        time.Now(),
+		explorerActive:     false,
+		downloadActive:     false,
 	}
 
-	addLog("🔍 Scan initial du dossier local...")
+	addLog("📁 Scan initial du dossier local...")
 	time.Sleep(200 * time.Millisecond)
 	(*client).scanInitial()
 	addLog("✅ Client prêt - Mode Manuel")
@@ -194,10 +202,25 @@ func StartClientGUI(serverAddr, hostID, syncDir string, stopAnimation, connectio
 
 		time.Sleep(30 * time.Millisecond)
 
+		// Vérifier si c'est un message pour l'explorateur
+		var treeItem FileTreeItemMessage
+		if err := json.Unmarshal(rawMsg, &treeItem); err == nil {
+			if (treeItem.Type == "file_tree_item" || treeItem.Type == "file_tree_complete") && (*client).explorerActive {
+				(*client).treeItemsChan <- treeItem
+				continue
+			}
+		}
+
 		// Traiter comme message normal de synchronisation
 		var msg FileChange
 		if err := json.Unmarshal(rawMsg, &msg); err == nil {
 			if msg.Origin != "client" {
+				// Si le mode téléchargement est actif, router vers le canal de téléchargement
+				if (*client).downloadActive {
+					(*client).downloadChan <- msg
+					continue
+				}
+				
 				if (*client).autoSync {
 					// Log groupé toutes les 2 secondes seulement
 					(*client).filesReceivedCount++

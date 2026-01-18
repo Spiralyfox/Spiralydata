@@ -158,14 +158,34 @@ func (s *Server) handleClientMessages(ws *websocket.Conn, clientName string) {
 			break
 		}
 		
-		var reqMap map[string]string
+		var reqMap map[string]interface{}
 		if err := json.Unmarshal(rawMsg, &reqMap); err == nil {
-			if reqType, ok := reqMap["type"]; ok {
+			if reqType, ok := reqMap["type"].(string); ok {
 				if reqType == "request_all_files" {
 					addLog(fmt.Sprintf("📥 %s: Demande structure complète", clientName))
 					s.sendAllFilesAndDirs(ws)
 					addLog(fmt.Sprintf("📤 Structure envoyée à %s", clientName))
 					continue
+				}
+				
+				if reqType == "request_file_tree" {
+					addLog(fmt.Sprintf("📂 %s: Demande arborescence", clientName))
+					s.sendFileTree(ws)
+					continue
+				}
+				
+				if reqType == "download_request" {
+					if items, ok := reqMap["items"].([]interface{}); ok {
+						itemPaths := make([]string, 0, len(items))
+						for _, item := range items {
+							if path, ok := item.(string); ok {
+								itemPaths = append(itemPaths, path)
+							}
+						}
+						addLog(fmt.Sprintf("⬇️ %s: Téléchargement de %d éléments", clientName, len(itemPaths)))
+						s.sendSelectedFiles(ws, itemPaths)
+						continue
+					}
 				}
 			}
 		}

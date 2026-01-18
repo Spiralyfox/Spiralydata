@@ -17,3 +17,15 @@ type AuthResponse struct {
 	Type    string `json:"type"`    // "auth_success" ou "auth_failed"
 	Message string `json:"message"`
 }
+
+type FileTreeItemMessage struct {
+	Type  string `json:"type"` // "file_tree_item" ou "file_tree_complete"
+	Path  string `json:"path"`
+	Name  string `json:"name"`
+	IsDir bool   `json:"is_dir"`
+}
+
+type DownloadRequest struct {
+	Type  string   `json:"type"` // "download_request"
+	Items []string `json:"items"`
+}

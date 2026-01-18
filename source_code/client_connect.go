@@ -56,6 +56,11 @@ func showUserConnecting(win fyne.Window, serverAddr, hostID, syncDir string) {
 	syncBtn.Importance = widget.DangerImportance
 	syncBtn.Hide()
 	
+	explorerBtn := widget.NewButton("EXPLORATEUR", nil)
+	explorerBtn.Importance = widget.MediumImportance
+	explorerBtn.Disable()
+	explorerBtn.Hide()
+	
 	pullBtn := widget.NewButton("RECEVOIR", nil)
 	pullBtn.Importance = widget.MediumImportance
 	pullBtn.Disable()
@@ -79,6 +84,7 @@ func showUserConnecting(win fyne.Window, serverAddr, hostID, syncDir string) {
 				syncBtn.Importance = widget.SuccessImportance
 				statusLabel.SetText("📡 Statut: Synchronisation Automatique Active")
 				
+				explorerBtn.Disable()
 				pullBtn.Disable()
 				pushBtn.Disable()
 				clearBtn.Disable()
@@ -87,12 +93,22 @@ func showUserConnecting(win fyne.Window, serverAddr, hostID, syncDir string) {
 				syncBtn.Importance = widget.DangerImportance
 				statusLabel.SetText("📡 Statut: Mode Manuel")
 				
+				explorerBtn.Enable()
 				pullBtn.Enable()
 				pushBtn.Enable()
 				clearBtn.Enable()
 			}
 			syncBtn.Refresh()
 			statusLabel.Refresh()
+		}
+	}
+	
+	explorerBtn.OnTapped = func() {
+		if client != nil && !client.autoSync {
+			explorer := NewFileExplorer(client, win, func() {
+				showUserConnected(win, serverAddr, hostID, syncDir, client, &stopAnimation, &connectionSuccess, loadingLabel, statusLabel, info)
+			})
+			explorer.Show()
 		}
 	}
 	
@@ -152,6 +168,11 @@ func showUserConnecting(win fyne.Window, serverAddr, hostID, syncDir string) {
 	manualControlsContainer := container.NewVBox(
 		widget.NewSeparator(),
 		widget.NewLabelWithStyle("🎮 Contrôles Manuels", fyne.TextAlignCenter, fyne.TextStyle{Bold: true}),
+		container.NewCenter(
+			container.NewMax(
+				container.NewPadded(explorerBtn),
+			),
+		),
 		container.NewCenter(
 			container.NewMax(
 				container.NewPadded(pullBtn),
@@ -238,10 +259,12 @@ func showUserConnecting(win fyne.Window, serverAddr, hostID, syncDir string) {
 		time.Sleep(2 * time.Second)
 		if connectionSuccess {
 			syncBtn.Show()
+			explorerBtn.Show()
 			pullBtn.Show()
 			pushBtn.Show()
 			clearBtn.Show()
 			
+			explorerBtn.Enable()
 			pullBtn.Enable()
 			pushBtn.Enable()
 			clearBtn.Enable()
@@ -253,4 +276,190 @@ func showUserConnecting(win fyne.Window, serverAddr, hostID, syncDir string) {
 			addLog("🎮 Interface de contrôle prête")
 		}
 	}()
+}
+
+func showUserConnected(win fyne.Window, serverAddr, hostID, syncDir string, client *Client, stopAnimation *bool, connectionSuccess *bool, loadingLabel, statusLabel, info *widget.Label) {
+	syncBtn := widget.NewButton("SYNC AUTO", nil)
+	syncBtn.Importance = widget.DangerImportance
+	
+	explorerBtn := widget.NewButton("EXPLORATEUR", nil)
+	explorerBtn.Importance = widget.MediumImportance
+	
+	pullBtn := widget.NewButton("RECEVOIR", nil)
+	pullBtn.Importance = widget.MediumImportance
+	
+	pushBtn := widget.NewButton("ENVOYER", nil)
+	pushBtn.Importance = widget.MediumImportance
+	
+	clearBtn := widget.NewButton("VIDER LOCAL", nil)
+	clearBtn.Importance = widget.MediumImportance
+	
+	if client.autoSync {
+		syncBtn.SetText("🟢 SYNC AUTO ACTIF")
+		syncBtn.Importance = widget.SuccessImportance
+		explorerBtn.Disable()
+		pullBtn.Disable()
+		pushBtn.Disable()
+		clearBtn.Disable()
+	}
+	
+	syncBtn.OnTapped = func() {
+		if client != nil {
+			client.ToggleAutoSync()
+			if client.autoSync {
+				syncBtn.SetText("🟢 SYNC AUTO ACTIF")
+				syncBtn.Importance = widget.SuccessImportance
+				statusLabel.SetText("📡 Statut: Synchronisation Automatique Active")
+				
+				explorerBtn.Disable()
+				pullBtn.Disable()
+				pushBtn.Disable()
+				clearBtn.Disable()
+			} else {
+				syncBtn.SetText("SYNC AUTO")
+				syncBtn.Importance = widget.DangerImportance
+				statusLabel.SetText("📡 Statut: Mode Manuel")
+				
+				explorerBtn.Enable()
+				pullBtn.Enable()
+				pushBtn.Enable()
+				clearBtn.Enable()
+			}
+			syncBtn.Refresh()
+			statusLabel.Refresh()
+		}
+	}
+	
+	explorerBtn.OnTapped = func() {
+		if client != nil && !client.autoSync {
+			explorer := NewFileExplorer(client, win, func() {
+				showUserConnected(win, serverAddr, hostID, syncDir, client, stopAnimation, connectionSuccess, loadingLabel, statusLabel, info)
+			})
+			explorer.Show()
+		}
+	}
+	
+	pullBtn.OnTapped = func() {
+		if client != nil && !client.autoSync {
+			pullBtn.Disable()
+			pullBtn.SetText("⏳ Reception...")
+			go func() {
+				client.PullAllFromServer()
+				time.Sleep(100 * time.Millisecond)
+				pullBtn.SetText("RECEVOIR")
+				pullBtn.Enable()
+				pullBtn.Refresh()
+			}()
+		}
+	}
+	
+	pushBtn.OnTapped = func() {
+		if client != nil && !client.autoSync {
+			pushBtn.Disable()
+			pushBtn.SetText("⏳ Envoi...")
+			go func() {
+				client.PushLocalChanges()
+				time.Sleep(100 * time.Millisecond)
+				pushBtn.SetText("ENVOYER")
+				pushBtn.Enable()
+				pushBtn.Refresh()
+			}()
+		}
+	}
+	
+	clearBtn.OnTapped = func() {
+		if client != nil && !client.autoSync {
+			clearBtn.Disable()
+			clearBtn.SetText("⏳ Suppression...")
+			go func() {
+				client.ClearLocalFiles()
+				time.Sleep(100 * time.Millisecond)
+				clearBtn.SetText("VIDER LOCAL")
+				clearBtn.Enable()
+				clearBtn.Refresh()
+			}()
+		}
+	}
+	
+	syncContainer := container.NewVBox(
+		widget.NewSeparator(),
+		widget.NewLabelWithStyle("⚙️ Mode de Synchronisation", fyne.TextAlignCenter, fyne.TextStyle{Bold: true}),
+		container.NewCenter(
+			container.NewMax(
+				container.NewPadded(syncBtn),
+			),
+		),
+	)
+	
+	manualControlsContainer := container.NewVBox(
+		widget.NewSeparator(),
+		widget.NewLabelWithStyle("🎮 Contrôles Manuels", fyne.TextAlignCenter, fyne.TextStyle{Bold: true}),
+		container.NewCenter(
+			container.NewMax(
+				container.NewPadded(explorerBtn),
+			),
+		),
+		container.NewCenter(
+			container.NewMax(
+				container.NewPadded(pullBtn),
+			),
+		),
+		container.NewCenter(
+			container.NewMax(
+				container.NewPadded(pushBtn),
+			),
+		),
+		widget.NewSeparator(),
+		widget.NewLabelWithStyle("⚡ Actions Avancées", fyne.TextAlignCenter, fyne.TextStyle{Bold: true}),
+		container.NewCenter(
+			container.NewMax(
+				container.NewPadded(clearBtn),
+			),
+		),
+	)
+	
+	disconnectBtn := widget.NewButton("DÉCONNECTER", func() {
+		addLog("👋 Déconnexion...")
+		*stopAnimation = true
+		if client != nil {
+			client.shouldExit = true
+			if client.ws != nil {
+				client.ws.Close()
+			}
+		}
+		win.SetContent(container.NewHSplit(
+			createMainMenu(win),
+			container.NewBorder(
+				widget.NewLabelWithStyle("📋 Logs", fyne.TextAlignCenter, fyne.TextStyle{Bold: true}),
+				nil, nil, nil,
+				container.NewVScroll(logWidget),
+			),
+		))
+	})
+	disconnectBtn.Importance = widget.DangerImportance
+	
+	content := container.NewVBox(
+		widget.NewLabelWithStyle("ℹ️ Informations de Connexion", fyne.TextAlignCenter, fyne.TextStyle{Bold: true}),
+		widget.NewSeparator(),
+		info,
+		widget.NewSeparator(),
+		loadingLabel,
+		statusLabel,
+		syncContainer,
+		manualControlsContainer,
+		layout.NewSpacer(),
+		container.NewCenter(container.NewPadded(disconnectBtn)),
+	)
+	
+	split := container.NewHSplit(
+		content,
+		container.NewBorder(
+			widget.NewLabelWithStyle("📋 Logs", fyne.TextAlignCenter, fyne.TextStyle{Bold: true}),
+			nil, nil, nil,
+			container.NewVScroll(logWidget),
+		),
+	)
+	split.Offset = 0.5
+	
+	win.SetContent(split)
 }
