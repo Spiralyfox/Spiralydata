@@ -1,0 +1,11 @@
+# Binaires compilés
+*.exe
+*.out
+*.dll
+
+# Go
+/vendor/
+
+# OS
+.DS_Store
+Thumbs.db
