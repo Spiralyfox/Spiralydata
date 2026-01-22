@@ -15,9 +15,7 @@ type AppConfig struct {
 	AutoConnect   bool   `json:"auto_connect"`
 }
 
-var (
-	configFilePath string
-)
+var configFilePath string
 
 func init() {
 	configFilePath = filepath.Join(getExecutableDir(), "spiraly_config.json")
@@ -44,4 +42,4 @@ func SaveConfig(config *AppConfig) error {
 	}
 	
 	return os.WriteFile(configFilePath, data, 0644)
-}
+} 

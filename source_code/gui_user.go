@@ -11,15 +11,9 @@ import (
 	"fyne.io/fyne/v2/widget"
 )
 
-var (
-	shouldAutoConnect = false
-)
-
 func showUserSetup(win fyne.Window) {
-	// Charger la config existante
 	config, _ := LoadConfig()
 	
-	// Labels et entries
 	serverLabel := widget.NewLabel("🌐 IP du serveur")
 	serverLabel.Alignment = fyne.TextAlignLeading
 	serverEntry := widget.NewEntry()
@@ -44,14 +38,12 @@ func showUserSetup(win fyne.Window) {
 		idEntry.SetText(config.HostID)
 	}
 	
-	// Sélection du dossier de synchronisation
 	syncDirLabel := widget.NewLabel("📁 Dossier de synchronisation")
 	syncDirLabel.Alignment = fyne.TextAlignLeading
 	
 	syncDirEntry := widget.NewEntry()
 	syncDirEntry.SetPlaceHolder("Sélectionnez un dossier...")
 	
-	// Dossier par défaut
 	defaultDir := filepath.Join(getExecutableDir(), "Spiralydata")
 	if config.SyncDirectory != "" {
 		syncDirEntry.SetText(config.SyncDirectory)
@@ -69,15 +61,12 @@ func showUserSetup(win fyne.Window) {
 	
 	dirContainer := container.NewBorder(nil, nil, nil, browseDirBtn, syncDirEntry)
 	
-	// Checkbox pour sauvegarder la config
 	saveCheck := widget.NewCheck("💾 Sauvegarder la configuration", nil)
 	saveCheck.SetChecked(config.SaveConfig)
 	
-	// Checkbox pour connexion automatique
-	autoConnectCheck := widget.NewCheck("→ Se connecter automatiquement au démarrage", nil)
+	autoConnectCheck := widget.NewCheck("↪ Se connecter automatiquement au démarrage", nil)
 	autoConnectCheck.SetChecked(config.AutoConnect)
 	
-	// Désactiver autoConnect si saveConfig n'est pas cochée
 	if !saveCheck.Checked {
 		autoConnectCheck.Disable()
 	}
@@ -91,7 +80,6 @@ func showUserSetup(win fyne.Window) {
 		}
 	}
 	
-	// Conteneur du formulaire
 	formContent := container.NewVBox(
 		serverLabel,
 		serverEntry,
@@ -109,7 +97,6 @@ func showUserSetup(win fyne.Window) {
 		autoConnectCheck,
 	)
 	
-	// Boutons
 	connectBtn := widget.NewButton("Se connecter", func() {
 		serverIP := serverEntry.Text
 		port := portEntry.Text
@@ -128,7 +115,6 @@ func showUserSetup(win fyne.Window) {
 		
 		serverAddr := serverIP + ":" + port
 		
-		// Sauvegarder la config si demandé
 		if saveCheck.Checked {
 			newConfig := &AppConfig{
 				ServerIP:       serverIP,
@@ -188,7 +174,6 @@ func showUserSetup(win fyne.Window) {
 	win.SetContent(split)
 }
 
-// Fonction pour tenter une connexion automatique au démarrage
 func tryAutoConnect(win fyne.Window) bool {
 	config, err := LoadConfig()
 	if err != nil || !config.AutoConnect || !config.SaveConfig {
@@ -202,7 +187,6 @@ func tryAutoConnect(win fyne.Window) bool {
 	addLog("⚡ Connexion automatique...")
 	serverAddr := config.ServerIP + ":" + config.ServerPort
 	
-	// Utiliser le dossier de sync configuré ou le défaut
 	syncDir := config.SyncDirectory
 	if syncDir == "" {
 		syncDir = filepath.Join(getExecutableDir(), "Spiralydata")
@@ -210,4 +194,4 @@ func tryAutoConnect(win fyne.Window) bool {
 	
 	showUserConnecting(win, serverAddr, config.HostID, syncDir)
 	return true
-}
+} 

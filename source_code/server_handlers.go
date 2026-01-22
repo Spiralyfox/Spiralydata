@@ -11,10 +11,6 @@ import (
 	"github.com/gorilla/websocket"
 )
 
-// ============================================================
-// FONCTIONS SERVEUR
-// ============================================================
-
 func (s *Server) sendAllFilesAndDirs(ws *websocket.Conn) {
 	addLog("📤 Début envoi structure...")
 	time.Sleep(200 * time.Millisecond)
@@ -216,11 +212,15 @@ func (s *Server) watchRecursive() {
 	s.addDirToWatcher(watcher, s.WatchDir)
 
 	for {
-		if s.shouldExit {
-			return
-		}
 		select {
-		case event := <-watcher.Events:
+		case <-s.ctx.Done():
+			return
+			
+		case event, ok := <-watcher.Events:
+			if !ok {
+				return
+			}
+			
 			time.Sleep(50 * time.Millisecond)
 			s.handleEvent(event)
 			
@@ -231,7 +231,10 @@ func (s *Server) watchRecursive() {
 				}
 			}
 			
-		case err := <-watcher.Errors:
+		case err, ok := <-watcher.Errors:
+			if !ok {
+				return
+			}
 			if !s.shouldExit {
 				addLog("⚠️ Erreur watcher: " + err.Error())
 			}
@@ -449,104 +452,109 @@ func (s *Server) periodicCheck() {
 	ticker := time.NewTicker(3 * time.Second)
 	defer ticker.Stop()
 	
-	for range ticker.C {
-		if s.shouldExit {
+	for {
+		select {
+		case <-s.ctx.Done():
 			return
-		}
-
-		time.Sleep(200 * time.Millisecond)
-
-		currentFiles := make(map[string]time.Time)
-		currentDirs := make(map[string]time.Time)
-		s.scanCurrentState(s.WatchDir, "", currentFiles, currentDirs)
-
-		s.mu.Lock()
-		
-		for oldDir := range s.knownDirs {
-			if until, exists := s.skipNext[oldDir]; exists && time.Now().Before(until) {
-				continue
+		case <-ticker.C:
+			if s.shouldExit {
+				return
 			}
-			if _, exists := currentDirs[oldDir]; !exists {
-				msg := FileChange{
-					FileName: oldDir,
-					Op:       "remove",
-					IsDir:    true,
-					Origin:   "server",
-				}
-				delete(s.knownDirs, oldDir)
-				for c := range s.Clients {
-					c.WriteJSON(msg)
-				}
-				addLog("🗑️ Dossier supprimé: " + oldDir)
-				time.Sleep(150 * time.Millisecond)
-			}
-		}
-		
-		for oldFile := range s.knownFiles {
-			if until, exists := s.skipNext[oldFile]; exists && time.Now().Before(until) {
-				continue
-			}
-			if _, exists := currentFiles[oldFile]; !exists {
-				msg := FileChange{
-					FileName: oldFile,
-					Op:       "remove",
-					IsDir:    false,
-					Origin:   "server",
-				}
-				delete(s.knownFiles, oldFile)
-				for c := range s.Clients {
-					c.WriteJSON(msg)
-				}
-				addLog("🗑️ Supprimé: " + oldFile)
-				time.Sleep(150 * time.Millisecond)
-			}
-		}
 
-		for newDir, modTime := range currentDirs {
-			if _, exists := s.knownDirs[newDir]; !exists {
-				if until, exists := s.skipNext[newDir]; exists && time.Now().Before(until) {
+			time.Sleep(200 * time.Millisecond)
+
+			currentFiles := make(map[string]time.Time)
+			currentDirs := make(map[string]time.Time)
+			s.scanCurrentState(s.WatchDir, "", currentFiles, currentDirs)
+
+			s.mu.Lock()
+			
+			for oldDir := range s.knownDirs {
+				if until, exists := s.skipNext[oldDir]; exists && time.Now().Before(until) {
 					continue
 				}
-				msg := FileChange{
-					FileName: newDir,
-					Op:       "mkdir",
-					IsDir:    true,
-					Origin:   "server",
-				}
-				s.knownDirs[newDir] = modTime
-				for c := range s.Clients {
-					c.WriteJSON(msg)
-				}
-				addLog("📤 Dossier créé: " + newDir)
-				time.Sleep(150 * time.Millisecond)
-			}
-		}
-
-		for name, modTime := range currentFiles {
-			if t, exists := s.knownFiles[name]; !exists || modTime.After(t) {
-				if until, exists := s.skipNext[name]; exists && time.Now().Before(until) {
-					continue
-				}
-
-				data, err := readFileWithRetry(filepath.Join(s.WatchDir, name))
-				if err == nil {
+				if _, exists := currentDirs[oldDir]; !exists {
 					msg := FileChange{
-						FileName: name,
-						Op:       "write",
-						Content:  base64.StdEncoding.EncodeToString(data),
-						IsDir:    false,
+						FileName: oldDir,
+						Op:       "remove",
+						IsDir:    true,
 						Origin:   "server",
 					}
+					delete(s.knownDirs, oldDir)
 					for c := range s.Clients {
 						c.WriteJSON(msg)
 					}
-					s.knownFiles[name] = modTime
-					addLog("📤 Modifié: " + name)
+					addLog("🗑️ Dossier supprimé: " + oldDir)
 					time.Sleep(150 * time.Millisecond)
 				}
 			}
+			
+			for oldFile := range s.knownFiles {
+				if until, exists := s.skipNext[oldFile]; exists && time.Now().Before(until) {
+					continue
+				}
+				if _, exists := currentFiles[oldFile]; !exists {
+					msg := FileChange{
+						FileName: oldFile,
+						Op:       "remove",
+						IsDir:    false,
+						Origin:   "server",
+					}
+					delete(s.knownFiles, oldFile)
+					for c := range s.Clients {
+						c.WriteJSON(msg)
+					}
+					addLog("🗑️ Supprimé: " + oldFile)
+					time.Sleep(150 * time.Millisecond)
+				}
+			}
+
+			for newDir, modTime := range currentDirs {
+				if _, exists := s.knownDirs[newDir]; !exists {
+					if until, exists := s.skipNext[newDir]; exists && time.Now().Before(until) {
+						continue
+					}
+					msg := FileChange{
+						FileName: newDir,
+						Op:       "mkdir",
+						IsDir:    true,
+						Origin:   "server",
+					}
+					s.knownDirs[newDir] = modTime
+					for c := range s.Clients {
+						c.WriteJSON(msg)
+					}
+					addLog("📤 Dossier créé: " + newDir)
+					time.Sleep(150 * time.Millisecond)
+				}
+			}
+
+			for name, modTime := range currentFiles {
+				if t, exists := s.knownFiles[name]; !exists || modTime.After(t) {
+					if until, exists := s.skipNext[name]; exists && time.Now().Before(until) {
+						continue
+					}
+
+					data, err := readFileWithRetry(filepath.Join(s.WatchDir, name))
+					if err == nil {
+						msg := FileChange{
+							FileName: name,
+							Op:       "write",
+							Content:  base64.StdEncoding.EncodeToString(data),
+							IsDir:    false,
+							Origin:   "server",
+						}
+						for c := range s.Clients {
+							c.WriteJSON(msg)
+						}
+						s.knownFiles[name] = modTime
+						addLog("📤 Modifié: " + name)
+						time.Sleep(150 * time.Millisecond)
+					}
+				}
+			}
+			s.mu.Unlock()
 		}
-		s.mu.Unlock()
 	}
 }
 
@@ -576,4 +584,4 @@ func (s *Server) scanCurrentState(basePath, relPath string, files map[string]tim
 			time.Sleep(50 * time.Millisecond)
 		}
 	}
-}
+} 

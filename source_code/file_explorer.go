@@ -30,7 +30,7 @@ type FileExplorer struct {
 	allItems         map[string]*FileTreeItem
 	currentDir       *FileTreeItem
 	rootDir          *FileTreeItem
-	itemWidgets      map[string]*widget.Check
+	selectedItems    map[string]bool
 	mu               sync.Mutex
 	loadingLabel     *widget.Label
 	contentContainer *fyne.Container
@@ -40,16 +40,21 @@ type FileExplorer struct {
 
 func NewFileExplorer(client *Client, win fyne.Window, backCallback func()) *FileExplorer {
 	return &FileExplorer{
-		client:       client,
-		win:          win,
-		allItems:     make(map[string]*FileTreeItem),
-		itemWidgets:  make(map[string]*widget.Check),
-		backCallback: backCallback,
-		treeLoaded:   false,
+		client:        client,
+		win:           win,
+		allItems:      make(map[string]*FileTreeItem),
+		selectedItems: make(map[string]bool),
+		backCallback:  backCallback,
+		treeLoaded:    false,
 	}
 }
 
 func (fe *FileExplorer) Show() {
+	if fe.treeLoaded {
+		fe.showDirectoryUI()
+		return
+	}
+	
 	fe.loadingLabel = widget.NewLabel("📄 Chargement de la structure des fichiers...")
 	fe.loadingLabel.Alignment = fyne.TextAlignCenter
 	
@@ -105,9 +110,8 @@ func (fe *FileExplorer) Show() {
 }
 
 func (fe *FileExplorer) requestAndBuildTree(stopLoading *bool, progressLabel *widget.Label) {
-	addLog("📂 Demande de la structure des fichiers au serveur...")
+	addLog("📂 Scan complet de la structure des fichiers...")
 	
-	// Activer le mode explorateur sur le client
 	fe.client.explorerActive = true
 	fe.client.treeItemsChan = make(chan FileTreeItemMessage, 100)
 	
@@ -160,7 +164,7 @@ func (fe *FileExplorer) requestAndBuildTree(stopLoading *bool, progressLabel *wi
 				*stopLoading = true
 				complete = true
 				fe.client.explorerActive = false
-				addLog(fmt.Sprintf("✅ %d fichiers/dossiers reçus", filesReceived))
+				addLog(fmt.Sprintf("✅ Structure complète chargée: %d éléments", filesReceived))
 				fe.buildTreeStructure()
 				fe.showDirectoryUI()
 				return
@@ -172,7 +176,6 @@ func (fe *FileExplorer) requestAndBuildTree(stopLoading *bool, progressLabel *wi
 func (fe *FileExplorer) buildTreeStructure() {
 	addLog("🔨 Construction de l'arborescence...")
 	
-	// Créer la racine virtuelle
 	fe.rootDir = &FileTreeItem{
 		Path:     "",
 		Name:     "Spiralydata",
@@ -181,7 +184,6 @@ func (fe *FileExplorer) buildTreeStructure() {
 	}
 	fe.allItems[""] = fe.rootDir
 	
-	// Construire les relations parent-enfant
 	for path, item := range fe.allItems {
 		if path == "" {
 			continue
@@ -200,7 +202,6 @@ func (fe *FileExplorer) buildTreeStructure() {
 		}
 	}
 	
-	// Trier les enfants
 	for _, item := range fe.allItems {
 		if item.IsDir && len(item.Children) > 0 {
 			sort.Slice(item.Children, func(i, j int) bool {
@@ -217,8 +218,6 @@ func (fe *FileExplorer) buildTreeStructure() {
 }
 
 func (fe *FileExplorer) showDirectoryUI() {
-	fe.itemWidgets = make(map[string]*widget.Check)
-	
 	currentPath := fe.currentDir.Path
 	if currentPath == "" {
 		currentPath = "/"
@@ -227,11 +226,21 @@ func (fe *FileExplorer) showDirectoryUI() {
 	title := widget.NewLabelWithStyle(fmt.Sprintf("📁 %s", currentPath), fyne.TextAlignCenter, fyne.TextStyle{Bold: true})
 	
 	selectAllBtn := widget.NewButton("Tout sélectionner", func() {
-		fe.selectAll(true)
+		fe.mu.Lock()
+		for _, item := range fe.currentDir.Children {
+			fe.selectedItems[item.Path] = true
+		}
+		fe.mu.Unlock()
+		fe.showDirectoryUI()
 	})
 	
 	deselectAllBtn := widget.NewButton("Tout désélectionner", func() {
-		fe.selectAll(false)
+		fe.mu.Lock()
+		for _, item := range fe.currentDir.Children {
+			fe.selectedItems[item.Path] = false
+		}
+		fe.mu.Unlock()
+		fe.showDirectoryUI()
 	})
 	
 	parentBtn := widget.NewButton("⬆️ Dossier parent", func() {
@@ -245,16 +254,33 @@ func (fe *FileExplorer) showDirectoryUI() {
 		parentBtn.Disable()
 	}
 	
-	selectionBar := container.NewHBox(
-		parentBtn,
-		layout.NewSpacer(),
-		selectAllBtn,
-		deselectAllBtn,
-	)
+	// Bouton de suppression du dossier actuel
+	deleteBtn := widget.NewButton("Delete Directory", func() {
+		fe.confirmDeleteDirectory()
+	})
+	deleteBtn.Importance = widget.DangerImportance
+	
+	// Le bouton de suppression n'est visible que si on n'est pas à la racine
+	var selectionBar *fyne.Container
+	if fe.currentDir.Parent != nil {
+		selectionBar = container.NewHBox(
+			parentBtn,
+			deleteBtn,
+			layout.NewSpacer(),
+			selectAllBtn,
+			deselectAllBtn,
+		)
+	} else {
+		selectionBar = container.NewHBox(
+			parentBtn,
+			layout.NewSpacer(),
+			selectAllBtn,
+			deselectAllBtn,
+		)
+	}
 	
 	treeContent := container.NewVBox()
 	
-	// Afficher uniquement le contenu du dossier actuel
 	for _, item := range fe.currentDir.Children {
 		fe.addItemToList(treeContent, item)
 	}
@@ -307,12 +333,131 @@ func (fe *FileExplorer) showDirectoryUI() {
 	)
 	split.Offset = 0.5
 	
-	fe.contentContainer.Objects = []fyne.CanvasObject{mainContent}
-	fe.contentContainer.Refresh()
-	
 	fe.win.SetContent(split)
+}
+
+func (fe *FileExplorer) confirmDeleteDirectory() {
+	dirName := fe.currentDir.Name
+	dirPath := fe.currentDir.Path
 	
-	addLog(fmt.Sprintf("✅ Explorateur: %s", currentPath))
+	warningText := fmt.Sprintf(
+		"⚠️ ATTENTION\n\n"+
+			"Vous êtes sur le point de SUPPRIMER le dossier :\n\n"+
+			"📁 %s\n\n"+
+			"Cette action supprimera le dossier et TOUT son contenu\n"+
+			"DIRECTEMENT sur le serveur hôte.\n\n"+
+			"Cette action est IRRÉVERSIBLE.\n\n"+
+			"Voulez-vous vraiment continuer ?",
+		dirName,
+	)
+	
+	warningLabel := widget.NewLabel(warningText)
+	warningLabel.Wrapping = fyne.TextWrapWord
+	
+	confirmDialog := dialog.NewCustomConfirm(
+		"⚠️ Confirmation de suppression",
+		"SUPPRIMER",
+		"Annuler",
+		warningLabel,
+		func(confirmed bool) {
+			if confirmed {
+				fe.deleteDirectory(dirPath)
+			}
+		},
+		fe.win,
+	)
+	
+	confirmDialog.Show()
+}
+
+func (fe *FileExplorer) deleteDirectory(dirPath string) {
+	addLog(fmt.Sprintf("🗑️ Suppression du dossier : %s", dirPath))
+	
+	// Envoyer la commande de suppression au serveur
+	change := FileChange{
+		FileName: dirPath,
+		Op:       "remove",
+		IsDir:    true,
+		Origin:   "client",
+	}
+	
+	fe.client.mu.Lock()
+	err := fe.client.ws.WriteJSON(change)
+	fe.client.mu.Unlock()
+	
+	if err != nil {
+		addLog(fmt.Sprintf("❌ Erreur suppression : %v", err))
+		dialog.ShowError(fmt.Errorf("Impossible de supprimer le dossier"), fe.win)
+		return
+	}
+	
+	addLog("✅ Commande de suppression envoyée")
+	
+	time.Sleep(300 * time.Millisecond)
+	
+	// Supprimer le dossier de l'arborescence locale
+	fe.removeDirectoryFromTree(dirPath)
+	
+	// Nettoyer les sélections
+	fe.mu.Lock()
+	fe.cleanupDeletedDirectorySelections(dirPath)
+	fe.mu.Unlock()
+	
+	// Retourner au parent
+	if fe.currentDir.Parent != nil {
+		fe.currentDir = fe.currentDir.Parent
+		fe.showDirectoryUI()
+	}
+}
+
+func (fe *FileExplorer) removeDirectoryFromTree(dirPath string) {
+	fe.mu.Lock()
+	defer fe.mu.Unlock()
+	
+	// Trouver l'item à supprimer
+	item, exists := fe.allItems[dirPath]
+	if !exists {
+		return
+	}
+	
+	// Retirer de la liste des enfants du parent
+	if item.Parent != nil {
+		newChildren := []*FileTreeItem{}
+		for _, child := range item.Parent.Children {
+			if child.Path != dirPath {
+				newChildren = append(newChildren, child)
+			}
+		}
+		item.Parent.Children = newChildren
+	}
+	
+	// Supprimer récursivement tous les sous-éléments de allItems
+	fe.removeItemAndChildren(item)
+}
+
+func (fe *FileExplorer) removeItemAndChildren(item *FileTreeItem) {
+	// Supprimer tous les enfants d'abord
+	for _, child := range item.Children {
+		fe.removeItemAndChildren(child)
+	}
+	
+	// Supprimer l'item lui-même
+	delete(fe.allItems, item.Path)
+}
+
+func (fe *FileExplorer) cleanupDeletedDirectorySelections(dirPath string) {
+	// Supprimer les sélections du dossier et de tous ses enfants
+	toDelete := []string{}
+	for path := range fe.selectedItems {
+		// Si le path commence par dirPath ou est égal à dirPath
+		if path == dirPath || (len(path) > len(dirPath) && len(dirPath) > 0 && path[:len(dirPath)+1] == dirPath+"/") {
+			toDelete = append(toDelete, path)
+		}
+	}
+	
+	for _, path := range toDelete {
+		delete(fe.selectedItems, path)
+	}
 }
 
 func (fe *FileExplorer) addItemToList(parent *fyne.Container, item *FileTreeItem) {
@@ -323,38 +468,42 @@ func (fe *FileExplorer) addItemToList(parent *fyne.Container, item *FileTreeItem
 	
 	displayName := icon + " " + item.Name
 	
+	// Vérifier si cet item est sélectionné
+	fe.mu.Lock()
+	isSelected := fe.selectedItems[item.Path]
+	fe.mu.Unlock()
+	
+	// Créer le conteneur
 	itemContainer := container.NewHBox()
 	
-	if item.IsDir {
+	// Variables locales pour éviter les problèmes de closure
+	itemPath := item.Path
+	itemIsDir := item.IsDir
+	itemRef := item
+	
+	// Créer la checkbox
+	check := widget.NewCheck(displayName, func(checked bool) {
+		fe.mu.Lock()
+		fe.selectedItems[itemPath] = checked
+		fe.mu.Unlock()
+	})
+	check.SetChecked(isSelected)
+	
+	if itemIsDir {
 		openBtn := widget.NewButton("Ouvrir", func() {
-			fe.currentDir = item
+			fe.currentDir = itemRef
 			fe.showDirectoryUI()
 		})
 		openBtn.Importance = widget.LowImportance
-		
-		check := widget.NewCheck(displayName, nil)
-		fe.itemWidgets[item.Path] = check
 		
 		itemContainer.Add(check)
 		itemContainer.Add(layout.NewSpacer())
 		itemContainer.Add(openBtn)
 	} else {
-		check := widget.NewCheck(displayName, nil)
-		fe.itemWidgets[item.Path] = check
 		itemContainer.Add(check)
 	}
 	
 	parent.Add(itemContainer)
-}
-
-func (fe *FileExplorer) selectAll(selected bool) {
-	fe.mu.Lock()
-	defer fe.mu.Unlock()
-	
-	for _, check := range fe.itemWidgets {
-		check.SetChecked(selected)
-		check.Refresh()
-	}
 }
 
 func (fe *FileExplorer) showDownloadOptions() {
@@ -399,9 +548,12 @@ func (fe *FileExplorer) getSelectedItems() []string {
 	
 	var selected []string
 	
-	for path, check := range fe.itemWidgets {
-		if check.Checked {
-			selected = append(selected, path)
+	for path, isSelected := range fe.selectedItems {
+		if isSelected {
+			// Vérifier que l'item existe toujours dans l'arborescence
+			if _, exists := fe.allItems[path]; exists {
+				selected = append(selected, path)
+			}
 		}
 	}
 	
@@ -434,7 +586,6 @@ func (fe *FileExplorer) performDownload(items []string, targetDir string) {
 	
 	addLog(fmt.Sprintf("📦 %d fichiers/dossiers à télécharger", len(expandedItems)))
 	
-	// Activer le mode téléchargement
 	fe.client.downloadActive = true
 	fe.client.downloadChan = make(chan FileChange, 100)
 	
@@ -501,7 +652,11 @@ func (fe *FileExplorer) expandDirectories(items []string) []string {
 func (fe *FileExplorer) expandDirectoryRecursive(path string, expanded map[string]bool) {
 	expanded[path] = true
 	
-	if item, exists := fe.allItems[path]; exists && item.IsDir {
+	fe.mu.Lock()
+	item, exists := fe.allItems[path]
+	fe.mu.Unlock()
+	
+	if exists && item.IsDir {
 		for _, child := range item.Children {
 			fe.expandDirectoryRecursive(child.Path, expanded)
 		}

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -25,9 +26,13 @@ type Server struct {
 	shouldExit   bool
 	httpServer   *http.Server
 	pendingMoves map[string]time.Time
+	ctx          context.Context
+	cancel       context.CancelFunc
 }
 
 func NewServer(hostID string) *Server {
+	ctx, cancel := context.WithCancel(context.Background())
+	
 	return &Server{
 		HostID:  hostID,
 		Clients: make(map[*websocket.Conn]string),
@@ -40,6 +45,8 @@ func NewServer(hostID string) *Server {
 		pendingMoves: make(map[string]time.Time),
 		clientNum:    0,
 		shouldExit:   false,
+		ctx:          ctx,
+		cancel:       cancel,
 	}
 }
 
@@ -58,7 +65,12 @@ func (s *Server) Start(port string) {
 	go s.cleanPendingMoves()
 
 	http.HandleFunc("/ws", s.handleWS)
-	s.httpServer = &http.Server{Addr: ":" + port}
+	s.httpServer = &http.Server{
+		Addr:         ":" + port,
+		ReadTimeout:  15 * time.Second,
+		WriteTimeout: 15 * time.Second,
+		IdleTimeout:  60 * time.Second,
+	}
 	addLog(fmt.Sprintf("🌐 Port: %s", port))
 	
 	if err := s.httpServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
@@ -70,16 +82,27 @@ func (s *Server) Stop() {
 	addLog("🛑 Arrêt du serveur...")
 	s.shouldExit = true
 	
+	if s.cancel != nil {
+		s.cancel()
+	}
+	
 	s.mu.Lock()
 	for client := range s.Clients {
+		client.WriteControl(websocket.CloseMessage, 
+			websocket.FormatCloseMessage(websocket.CloseNormalClosure, ""),
+			time.Now().Add(time.Second))
 		client.Close()
 	}
+	s.Clients = make(map[*websocket.Conn]string)
 	s.mu.Unlock()
 	
 	if s.httpServer != nil {
-		s.httpServer.Close()
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		s.httpServer.Shutdown(ctx)
 	}
 	
+	time.Sleep(500 * time.Millisecond)
 	addLog("✅ Serveur arrêté")
 }
 
@@ -92,12 +115,14 @@ func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	ws.SetReadDeadline(time.Now().Add(10 * time.Second))
 	var rawMsg json.RawMessage
 	if err := ws.ReadJSON(&rawMsg); err != nil {
 		addLog(fmt.Sprintf("❌ Erreur lecture: %v", err))
 		ws.Close()
 		return
 	}
+	ws.SetReadDeadline(time.Time{})
 
 	var authReq AuthRequest
 	if err := json.Unmarshal(rawMsg, &authReq); err != nil {
@@ -271,18 +296,23 @@ func (s *Server) cleanPendingMoves() {
 	ticker := time.NewTicker(500 * time.Millisecond)
 	defer ticker.Stop()
 	
-	for range ticker.C {
-		if s.shouldExit {
+	for {
+		select {
+		case <-s.ctx.Done():
 			return
-		}
-		
-		s.mu.Lock()
-		now := time.Now()
-		for path, until := range s.pendingMoves {
-			if now.After(until) {
-				delete(s.pendingMoves, path)
+		case <-ticker.C:
+			if s.shouldExit {
+				return
 			}
+			
+			s.mu.Lock()
+			now := time.Now()
+			for path, until := range s.pendingMoves {
+				if now.After(until) {
+					delete(s.pendingMoves, path)
+				}
+			}
+			s.mu.Unlock()
 		}
-		s.mu.Unlock()
 	}
-}
+} 

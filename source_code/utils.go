@@ -6,7 +6,6 @@ import (
 	"time"
 )
 
-// Lit un fichier avec retry pour Windows
 func readFileWithRetry(path string) ([]byte, error) {
 	var data []byte
 	var err error
@@ -25,11 +24,10 @@ func readFileWithRetry(path string) ([]byte, error) {
 	return nil, err
 }
 
-// Retourne le dossier contenant l'exécutable
 func getExecutableDir() string {
 	exePath, err := os.Executable()
 	if err != nil {
 		return "."
 	}
 	return filepath.Dir(exePath)
-}
+} 

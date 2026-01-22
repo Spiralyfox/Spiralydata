@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
@@ -33,12 +34,13 @@ type Client struct {
 	pendingMu          sync.Mutex
 	filesReceivedCount int
 	lastLogTime        time.Time
-	
-	// Canaux pour l'explorateur et le téléchargement
 	explorerActive     bool
 	treeItemsChan      chan FileTreeItemMessage
 	downloadActive     bool
 	downloadChan       chan FileChange
+	ctx                context.Context
+	cancel             context.CancelFunc
+	watcherDone        chan struct{}
 }
 
 func StartClientGUI(serverAddr, hostID, syncDir string, stopAnimation, connectionSuccess *bool, loadingLabel, statusLabel, infoLabel *widget.Label, client **Client) {
@@ -46,7 +48,10 @@ func StartClientGUI(serverAddr, hostID, syncDir string, stopAnimation, connectio
 	
 	time.Sleep(300 * time.Millisecond)
 	
-	ws, _, err := websocket.DefaultDialer.Dial("ws://"+serverAddr+"/ws", nil)
+	dialer := websocket.DefaultDialer
+	dialer.HandshakeTimeout = 10 * time.Second
+	
+	ws, _, err := dialer.Dial("ws://"+serverAddr+"/ws", nil)
 	if err != nil {
 		addLog(fmt.Sprintf("❌ Impossible de se connecter: %v", err))
 		*stopAnimation = true
@@ -90,6 +95,7 @@ func StartClientGUI(serverAddr, hostID, syncDir string, stopAnimation, connectio
 	time.Sleep(300 * time.Millisecond)
 
 	addLog("⏳ Attente de la réponse...")
+	ws.SetReadDeadline(time.Now().Add(10 * time.Second))
 	var authResp AuthResponse
 	if err := ws.ReadJSON(&authResp); err != nil {
 		addLog(fmt.Sprintf("❌ Pas de réponse du serveur: %v", err))
@@ -101,6 +107,7 @@ func StartClientGUI(serverAddr, hostID, syncDir string, stopAnimation, connectio
 		statusLabel.Refresh()
 		return
 	}
+	ws.SetReadDeadline(time.Time{})
 
 	if authResp.Type == "auth_failed" {
 		addLog(fmt.Sprintf("🚫 Authentification refusée: %s", authResp.Message))
@@ -126,7 +133,7 @@ func StartClientGUI(serverAddr, hostID, syncDir string, stopAnimation, connectio
 	*stopAnimation = true
 	*connectionSuccess = true
 	addLog(fmt.Sprintf("🎉 Connecté au serveur %s", serverAddr))
-	addLog(fmt.Sprintf("🔑 ID validé: %s", hostID))
+	addLog(fmt.Sprintf("🔒 ID validé: %s", hostID))
 	
 	time.Sleep(200 * time.Millisecond)
 	
@@ -154,6 +161,8 @@ func StartClientGUI(serverAddr, hostID, syncDir string, stopAnimation, connectio
 
 	time.Sleep(300 * time.Millisecond)
 
+	ctx, cancel := context.WithCancel(context.Background())
+
 	*client = &Client{
 		ws:                 ws,
 		localDir:           syncDir,
@@ -173,9 +182,12 @@ func StartClientGUI(serverAddr, hostID, syncDir string, stopAnimation, connectio
 		lastLogTime:        time.Now(),
 		explorerActive:     false,
 		downloadActive:     false,
+		ctx:                ctx,
+		cancel:             cancel,
+		watcherDone:        make(chan struct{}),
 	}
 
-	addLog("📁 Scan initial du dossier local...")
+	addLog("🔍 Scan initial du dossier local...")
 	time.Sleep(200 * time.Millisecond)
 	(*client).scanInitial()
 	addLog("✅ Client prêt - Mode Manuel")
@@ -184,7 +196,6 @@ func StartClientGUI(serverAddr, hostID, syncDir string, stopAnimation, connectio
 	time.Sleep(300 * time.Millisecond)
 	go (*client).watchRecursive()
 
-	// Boucle de réception
 	for {
 		var rawMsg json.RawMessage
 		if err := ws.ReadJSON(&rawMsg); err != nil {
@@ -196,13 +207,14 @@ func StartClientGUI(serverAddr, hostID, syncDir string, stopAnimation, connectio
 				statusLabel.SetText("Statut: Déconnecté")
 				statusLabel.Refresh()
 			}
+			
+			(*client).cleanup()
 			ws.Close()
 			break
 		}
 
 		time.Sleep(30 * time.Millisecond)
 
-		// Vérifier si c'est un message pour l'explorateur
 		var treeItem FileTreeItemMessage
 		if err := json.Unmarshal(rawMsg, &treeItem); err == nil {
 			if (treeItem.Type == "file_tree_item" || treeItem.Type == "file_tree_complete") && (*client).explorerActive {
@@ -211,18 +223,15 @@ func StartClientGUI(serverAddr, hostID, syncDir string, stopAnimation, connectio
 			}
 		}
 
-		// Traiter comme message normal de synchronisation
 		var msg FileChange
 		if err := json.Unmarshal(rawMsg, &msg); err == nil {
 			if msg.Origin != "client" {
-				// Si le mode téléchargement est actif, router vers le canal de téléchargement
 				if (*client).downloadActive {
 					(*client).downloadChan <- msg
 					continue
 				}
 				
 				if (*client).autoSync {
-					// Log groupé toutes les 2 secondes seulement
 					(*client).filesReceivedCount++
 					if time.Since((*client).lastLogTime) > 2*time.Second {
 						if (*client).filesReceivedCount > 0 {
@@ -236,7 +245,6 @@ func StartClientGUI(serverAddr, hostID, syncDir string, stopAnimation, connectio
 					(*client).applyChange(msg)
 				} else {
 					if (*client).isProcessing {
-						// En mode réception, appliquer directement
 						(*client).filesReceivedCount++
 						if time.Since((*client).lastLogTime) > 2*time.Second {
 							if (*client).filesReceivedCount > 0 {
@@ -249,13 +257,41 @@ func StartClientGUI(serverAddr, hostID, syncDir string, stopAnimation, connectio
 						time.Sleep(50 * time.Millisecond)
 						(*client).applyChange(msg)
 					} else {
-						// Ajouter aux changements en attente sans logguer chaque fichier
 						(*client).pendingMu.Lock()
 						(*client).pendingChanges = append((*client).pendingChanges, msg)
 						(*client).pendingMu.Unlock()
 					}
 				}
 			}
+		}
+	}
+}
+
+func (c *Client) cleanup() {
+	c.shouldExit = true
+	
+	if c.cancel != nil {
+		c.cancel()
+	}
+	
+	if c.watcherActive {
+		select {
+		case <-c.watcherDone:
+		case <-time.After(2 * time.Second):
+		}
+	}
+	
+	if c.explorerActive {
+		c.explorerActive = false
+		if c.treeItemsChan != nil {
+			close(c.treeItemsChan)
+		}
+	}
+	
+	if c.downloadActive {
+		c.downloadActive = false
+		if c.downloadChan != nil {
+			close(c.downloadChan)
 		}
 	}
 }
@@ -396,4 +432,4 @@ func getSortedKeys(m map[string]time.Time) []string {
 		keys = append(keys, k)
 	}
 	return keys
-}
+} 

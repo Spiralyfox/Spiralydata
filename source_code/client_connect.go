@@ -15,10 +15,8 @@ func showUserConnecting(win fyne.Window, serverAddr, hostID, syncDir string) {
 	addLog(fmt.Sprintf("🔌 Connexion à %s...", serverAddr))
 	addLog(fmt.Sprintf("📁 Dossier de sync: %s", syncDir))
 	
-	// IMPORTANT: Créer le dossier AVANT toute tentative de connexion
 	if err := os.MkdirAll(syncDir, 0755); err != nil {
 		addLog(fmt.Sprintf("❌ Impossible de créer le dossier: %v", err))
-		// Retour au menu en cas d'erreur
 		win.SetContent(container.NewHSplit(
 			createMainMenu(win),
 			container.NewBorder(
@@ -198,6 +196,7 @@ func showUserConnecting(win fyne.Window, serverAddr, hostID, syncDir string) {
 		stopAnimation = true
 		if client != nil {
 			client.shouldExit = true
+			client.cleanup()
 			if client.ws != nil {
 				client.ws.Close()
 			}
@@ -423,6 +422,7 @@ func showUserConnected(win fyne.Window, serverAddr, hostID, syncDir string, clie
 		*stopAnimation = true
 		if client != nil {
 			client.shouldExit = true
+			client.cleanup()
 			if client.ws != nil {
 				client.ws.Close()
 			}
@@ -462,4 +462,4 @@ func showUserConnected(win fyne.Window, serverAddr, hostID, syncDir string, clie
 	split.Offset = 0.5
 	
 	win.SetContent(split)
-}
+} 

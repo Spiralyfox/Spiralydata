@@ -48,6 +48,10 @@ func (d darkTheme) Color(name fyne.ThemeColorName, variant fyne.ThemeVariant) co
 		return color.RGBA{R: 46, G: 204, B: 113, A: 255}
 	case theme.ColorNameError:
 		return color.RGBA{R: 231, G: 76, B: 60, A: 255}
+	case theme.ColorNameDisabled:
+		return color.RGBA{R: 255, G: 255, B: 255, A: 255}
+	case theme.ColorNameInputBackground:
+		return color.RGBA{R: 40, G: 44, B: 52, A: 255}
 	default:
 		return theme.DefaultTheme().Color(name, variant)
 	}
@@ -147,8 +151,6 @@ func StartGUI() {
 	logWidget.MultiLine = true
 	logWidget.Wrapping = fyne.TextWrapWord
 	logWidget.Disable()
-	
-	// Style monospace pour les logs
 	logWidget.TextStyle = fyne.TextStyle{Monospace: true}
 	
 	logScroll = container.NewVScroll(logWidget)
@@ -160,7 +162,6 @@ func StartGUI() {
 		logScroll,
 	)
 	
-	// Tentative de connexion automatique
 	if !tryAutoConnect(myWindow) {
 		content := createMainMenu(myWindow)
 		
@@ -184,7 +185,7 @@ func createMainMenu(win fyne.Window) fyne.CanvasObject {
 	title.Alignment = fyne.TextAlignCenter
 	title.TextStyle = fyne.TextStyle{Bold: true}
 	
-	subtitle := widget.NewLabel("📄 Synchronisation de fichiers intelligente")
+	subtitle := widget.NewLabel("📁 Synchronisation de fichiers intelligente")
 	subtitle.Alignment = fyne.TextAlignCenter
 	
 	hostBtn := widget.NewButton("Mode Hôte (Host)", func() {
@@ -405,4 +406,4 @@ func showHostRunning(win fyne.Window, port, hostID string) {
 		addLog(fmt.Sprintf("🌍 IP Publique: %s", pubIP))
 		currentServer.Start(port)
 	}()
-}
+} 

@@ -36,7 +36,6 @@ func (c *Client) PullAllFromServer() {
 				skipped++
 			}
 			
-			// Petit délai pour éviter la saturation
 			if applied > 0 && applied%20 == 0 {
 				time.Sleep(100 * time.Millisecond)
 			}
@@ -44,7 +43,7 @@ func (c *Client) PullAllFromServer() {
 		c.pendingChanges = []FileChange{}
 		
 		if skipped > 0 {
-			addLog(fmt.Sprintf("⏭️ %d fichiers ignorés (déjà à jour)", skipped))
+			addLog(fmt.Sprintf("⭐ %d fichiers ignorés (déjà à jour)", skipped))
 		}
 		if applied > 0 {
 			addLog(fmt.Sprintf("✅ %d fichiers appliqués", applied))
@@ -76,39 +75,32 @@ func (c *Client) PullAllFromServer() {
 	}()
 }
 
-// Vérifie si un changement doit être appliqué (compare les hash)
 func (c *Client) shouldApplyChange(change FileChange) bool {
 	if change.IsDir {
-		return true // Toujours créer les dossiers
+		return true
 	}
 	
 	if change.Op == "remove" {
-		return true // Toujours supprimer
+		return true
 	}
 	
-	// Vérifier si le fichier existe localement
 	normalizedPath := filepath.FromSlash(change.FileName)
 	localPath := filepath.Join(c.localDir, normalizedPath)
 	
 	localData, err := os.ReadFile(localPath)
 	if err != nil {
-		// Fichier n'existe pas localement, on doit l'appliquer
 		return true
 	}
 	
-	// Calculer le hash du fichier local
 	localHash := sha256.Sum256(localData)
 	
-	// Décoder le contenu du serveur
 	serverData, err := base64.StdEncoding.DecodeString(change.Content)
 	if err != nil {
-		return true // En cas d'erreur, appliquer quand même
+		return true
 	}
 	
-	// Calculer le hash du fichier serveur
 	serverHash := sha256.Sum256(serverData)
 	
-	// Comparer les hash
 	return localHash != serverHash
 }
 
@@ -119,7 +111,7 @@ func (c *Client) PushLocalChanges() {
 	}
 	
 	c.isProcessing = true
-	addLog("🔄 Envoi au serveur...")
+	addLog("📤 Envoi au serveur...")
 	
 	time.Sleep(200 * time.Millisecond)
 	
@@ -129,7 +121,6 @@ func (c *Client) PushLocalChanges() {
 	
 	sent := 0
 	
-	// Supprimer les dossiers et fichiers manquants
 	c.mu.Lock()
 	for knownDir := range c.knownDirs {
 		if _, exists := allDirs[knownDir]; !exists {
@@ -162,7 +153,6 @@ func (c *Client) PushLocalChanges() {
 	}
 	c.mu.Unlock()
 	
-	// Créer dossiers et fichiers
 	for i, dirPath := range getSortedKeys(allDirs) {
 		c.mu.Lock()
 		_, known := c.knownDirs[dirPath]
@@ -283,6 +273,10 @@ func (c *Client) watchRecursive() {
 		return
 	}
 	c.watcherActive = true
+	defer func() {
+		c.watcherActive = false
+		close(c.watcherDone)
+	}()
 	
 	time.Sleep(300 * time.Millisecond)
 	
@@ -297,12 +291,15 @@ func (c *Client) watchRecursive() {
 	addLog("👀 Surveillance activée")
 
 	for {
-		if c.shouldExit {
-			return
-		}
-		
 		select {
-		case event := <-watcher.Events:
+		case <-c.ctx.Done():
+			return
+			
+		case event, ok := <-watcher.Events:
+			if !ok {
+				return
+			}
+			
 			if c.autoSync {
 				time.Sleep(100 * time.Millisecond)
 				c.handleLocalEvent(event)
@@ -314,7 +311,11 @@ func (c *Client) watchRecursive() {
 					watcher.Add(event.Name)
 				}
 			}
-		case err := <-watcher.Errors:
+			
+		case err, ok := <-watcher.Errors:
+			if !ok {
+				return
+			}
 			if !c.shouldExit {
 				addLog(fmt.Sprintf("⚠️ Erreur watcher: %v", err))
 			}
@@ -353,7 +354,6 @@ func (c *Client) handleLocalEvent(event fsnotify.Event) {
 				Origin:   "client",
 			}
 			c.ws.WriteJSON(change)
-			// Pas de log individuel
 		} else {
 			time.Sleep(100 * time.Millisecond)
 			data, err := os.ReadFile(event.Name)
@@ -368,7 +368,6 @@ func (c *Client) handleLocalEvent(event fsnotify.Event) {
 				Origin:   "client",
 			}
 			c.ws.WriteJSON(change)
-			// Pas de log individuel
 		}
 		time.Sleep(150 * time.Millisecond)
 	}
@@ -404,114 +403,117 @@ func (c *Client) periodicScanner() {
 	ticker := time.NewTicker(3 * time.Second)
 	defer ticker.Stop()
 
-	for range ticker.C {
-		if c.shouldExit || !c.autoSync {
+	for {
+		select {
+		case <-c.ctx.Done():
 			return
-		}
-
-		time.Sleep(200 * time.Millisecond)
-
-		currentFiles := make(map[string]time.Time)
-		currentDirs := make(map[string]time.Time)
-		c.scanCurrentState(c.localDir, "", currentFiles, currentDirs)
-
-		c.mu.Lock()
-		
-		// Compteurs pour les logs groupés
-		dirsRemoved := 0
-		dirsCreated := 0
-		filesModified := 0
-		filesRemoved := 0
-		
-		for oldDir := range c.lastDirs {
-			if until, exists := c.skipNext[oldDir]; exists && time.Now().Before(until) {
-				continue
+		case <-ticker.C:
+			if c.shouldExit || !c.autoSync {
+				return
 			}
-			if _, exists := currentDirs[oldDir]; !exists {
-				change := FileChange{
-					FileName: oldDir,
-					Op:       "remove",
-					IsDir:    true,
-					Origin:   "client",
-				}
-				c.ws.WriteJSON(change)
-				delete(c.knownDirs, oldDir)
-				dirsRemoved++
-				time.Sleep(150 * time.Millisecond)
-			}
-		}
 
-		for newDir, modTime := range currentDirs {
-			if _, known := c.lastDirs[newDir]; !known {
-				if until, exists := c.skipNext[newDir]; exists && time.Now().Before(until) {
+			time.Sleep(200 * time.Millisecond)
+
+			currentFiles := make(map[string]time.Time)
+			currentDirs := make(map[string]time.Time)
+			c.scanCurrentState(c.localDir, "", currentFiles, currentDirs)
+
+			c.mu.Lock()
+			
+			dirsRemoved := 0
+			dirsCreated := 0
+			filesModified := 0
+			filesRemoved := 0
+			
+			for oldDir := range c.lastDirs {
+				if until, exists := c.skipNext[oldDir]; exists && time.Now().Before(until) {
 					continue
 				}
-				change := FileChange{
-					FileName: newDir,
-					Op:       "mkdir",
-					IsDir:    true,
-					Origin:   "client",
+				if _, exists := currentDirs[oldDir]; !exists {
+					change := FileChange{
+						FileName: oldDir,
+						Op:       "remove",
+						IsDir:    true,
+						Origin:   "client",
+					}
+					c.ws.WriteJSON(change)
+					delete(c.knownDirs, oldDir)
+					dirsRemoved++
+					time.Sleep(150 * time.Millisecond)
 				}
-				c.ws.WriteJSON(change)
-				c.knownDirs[newDir] = modTime
-				dirsCreated++
-				time.Sleep(150 * time.Millisecond)
-			}
-		}
-
-		for name, modTime := range currentFiles {
-			if until, exists := c.skipNext[name]; exists && time.Now().Before(until) {
-				continue
 			}
 
-			lastMod, known := c.lastState[name]
-			if !known || modTime.After(lastMod) {
-				time.Sleep(50 * time.Millisecond)
-				c.sendFileNow(name)
-				filesModified++
+			for newDir, modTime := range currentDirs {
+				if _, known := c.lastDirs[newDir]; !known {
+					if until, exists := c.skipNext[newDir]; exists && time.Now().Before(until) {
+						continue
+					}
+					change := FileChange{
+						FileName: newDir,
+						Op:       "mkdir",
+						IsDir:    true,
+						Origin:   "client",
+					}
+					c.ws.WriteJSON(change)
+					c.knownDirs[newDir] = modTime
+					dirsCreated++
+					time.Sleep(150 * time.Millisecond)
+				}
 			}
-		}
 
-		for oldFile := range c.lastState {
-			if _, still := currentFiles[oldFile]; !still {
-				if until, exists := c.skipNext[oldFile]; exists && time.Now().Before(until) {
-					delete(c.skipNext, oldFile)
+			for name, modTime := range currentFiles {
+				if until, exists := c.skipNext[name]; exists && time.Now().Before(until) {
 					continue
 				}
-				
-				change := FileChange{
-					FileName: oldFile,
-					Op:       "remove",
-					IsDir:    false,
-					Origin:   "client",
-				}
-				c.ws.WriteJSON(change)
-				delete(c.knownFiles, oldFile)
-				filesRemoved++
-				time.Sleep(150 * time.Millisecond)
-			}
-		}
 
-		c.lastState = currentFiles
-		c.lastDirs = currentDirs
-		c.mu.Unlock()
-		
-		// Log groupé uniquement s'il y a des changements
-		if dirsRemoved > 0 || dirsCreated > 0 || filesModified > 0 || filesRemoved > 0 {
-			var changes []string
-			if dirsCreated > 0 {
-				changes = append(changes, fmt.Sprintf("%d dossiers créés", dirsCreated))
+				lastMod, known := c.lastState[name]
+				if !known || modTime.After(lastMod) {
+					time.Sleep(50 * time.Millisecond)
+					c.sendFileNow(name)
+					filesModified++
+				}
 			}
-			if dirsRemoved > 0 {
-				changes = append(changes, fmt.Sprintf("%d dossiers supprimés", dirsRemoved))
+
+			for oldFile := range c.lastState {
+				if _, still := currentFiles[oldFile]; !still {
+					if until, exists := c.skipNext[oldFile]; exists && time.Now().Before(until) {
+						delete(c.skipNext, oldFile)
+						continue
+					}
+					
+					change := FileChange{
+						FileName: oldFile,
+						Op:       "remove",
+						IsDir:    false,
+						Origin:   "client",
+					}
+					c.ws.WriteJSON(change)
+					delete(c.knownFiles, oldFile)
+					filesRemoved++
+					time.Sleep(150 * time.Millisecond)
+				}
 			}
-			if filesModified > 0 {
-				changes = append(changes, fmt.Sprintf("%d fichiers modifiés", filesModified))
+
+			c.lastState = currentFiles
+			c.lastDirs = currentDirs
+			c.mu.Unlock()
+			
+			if dirsRemoved > 0 || dirsCreated > 0 || filesModified > 0 || filesRemoved > 0 {
+				var changes []string
+				if dirsCreated > 0 {
+					changes = append(changes, fmt.Sprintf("%d dossiers créés", dirsCreated))
+				}
+				if dirsRemoved > 0 {
+					changes = append(changes, fmt.Sprintf("%d dossiers supprimés", dirsRemoved))
+				}
+				if filesModified > 0 {
+					changes = append(changes, fmt.Sprintf("%d fichiers modifiés", filesModified))
+				}
+				if filesRemoved > 0 {
+					changes = append(changes, fmt.Sprintf("%d fichiers supprimés", filesRemoved))
+				}
+				addLog(fmt.Sprintf("📤 Sync: %s", strings.Join(changes, ", ")))
 			}
-			if filesRemoved > 0 {
-				changes = append(changes, fmt.Sprintf("%d fichiers supprimés", filesRemoved))
-			}
-			addLog(fmt.Sprintf("📤 Sync: %s", strings.Join(changes, ", ")))
 		}
 	}
 }
@@ -565,4 +567,4 @@ func (c *Client) sendFileNow(relPath string) {
 	c.ws.WriteJSON(change)
 	c.knownFiles[relPath] = time.Now()
 	time.Sleep(150 * time.Millisecond)
-}
+} 
