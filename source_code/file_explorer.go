@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 
@@ -20,6 +21,8 @@ type FileTreeItem struct {
 	Path     string
 	Name     string
 	IsDir    bool
+	Size     int64
+	ModTime  time.Time
 	Children []*FileTreeItem
 	Parent   *FileTreeItem
 }
@@ -36,6 +39,9 @@ type FileExplorer struct {
 	contentContainer *fyne.Container
 	backCallback     func()
 	treeLoaded       bool
+	settings         *ExplorerSettings
+	previewPanel     *PreviewPanel
+	showingPreview   bool
 }
 
 func NewFileExplorer(client *Client, win fyne.Window, backCallback func()) *FileExplorer {
@@ -46,10 +52,20 @@ func NewFileExplorer(client *Client, win fyne.Window, backCallback func()) *File
 		selectedItems: make(map[string]bool),
 		backCallback:  backCallback,
 		treeLoaded:    false,
+		settings:      NewExplorerSettings(),
 	}
 }
 
 func (fe *FileExplorer) Show() {
+	// Vérification de sécurité
+	if fe.client == nil {
+		addLog("❌ Erreur: client est nil")
+		if fe.backCallback != nil {
+			fe.backCallback()
+		}
+		return
+	}
+	
 	if fe.treeLoaded {
 		fe.showDirectoryUI()
 		return
@@ -82,13 +98,21 @@ func (fe *FileExplorer) Show() {
 	
 	fe.contentContainer = container.NewVBox(loadingContent)
 	
-	split := container.NewHSplit(
-		fe.contentContainer,
-		container.NewBorder(
+	// Vérification de logWidget
+	var logPanel fyne.CanvasObject
+	if logWidget != nil {
+		logPanel = container.NewBorder(
 			widget.NewLabelWithStyle("📋 Logs", fyne.TextAlignCenter, fyne.TextStyle{Bold: true}),
 			nil, nil, nil,
 			container.NewVScroll(logWidget),
-		),
+		)
+	} else {
+		logPanel = widget.NewLabel("Logs non disponibles")
+	}
+	
+	split := container.NewHSplit(
+		fe.contentContainer,
+		logPanel,
 	)
 	split.Offset = 0.5
 	
@@ -111,41 +135,77 @@ func (fe *FileExplorer) Show() {
 
 func (fe *FileExplorer) requestAndBuildTree(stopLoading *bool, progressLabel *widget.Label) {
 	addLog("📂 Scan complet de la structure des fichiers...")
+
+	// Vérification de sécurité
+	if fe.client == nil {
+		addLog("❌ Erreur: client est nil dans requestAndBuildTree")
+		*stopLoading = true
+		if fe.backCallback != nil {
+			fe.backCallback()
+		}
+		return
+	}
+
+	// Créer le channel AVANT d'activer explorerActive
+	fe.client.treeItemsChan = make(chan FileTreeItemMessage, 500)
 	
+	// Petit délai pour s'assurer que le channel est prêt
+	time.Sleep(100 * time.Millisecond)
+	
+	// Maintenant activer le flag
 	fe.client.explorerActive = true
-	fe.client.treeItemsChan = make(chan FileTreeItemMessage, 100)
-	
+
 	reqMsg := map[string]string{
 		"type":   "request_file_tree",
 		"origin": "client",
 	}
-	
-	fe.client.mu.Lock()
-	err := fe.client.ws.WriteJSON(reqMsg)
-	fe.client.mu.Unlock()
-	
+
+	addLog("📤 Envoi de la requête file_tree...")
+	err := fe.client.WriteJSONSafe(reqMsg)
+
 	if err != nil {
-		addLog("❌ Erreur lors de la demande")
+		addLog(fmt.Sprintf("❌ Erreur lors de la demande: %v", err))
 		*stopLoading = true
 		fe.client.explorerActive = false
+		// Utiliser le thread principal pour le callback
+		fe.win.Canvas().Content().Refresh()
 		fe.backCallback()
 		return
 	}
 	
+	addLog("✅ Requête envoyée, attente des données...")
+
 	filesReceived := 0
 	timeout := time.After(60 * time.Second)
 	complete := false
-	
+
 	for !complete && !*stopLoading {
 		select {
 		case <-timeout:
-			addLog("⏱️ Timeout lors de la réception")
+			addLog(fmt.Sprintf("⏱️ Timeout - %d éléments reçus", filesReceived))
 			*stopLoading = true
 			fe.client.explorerActive = false
-			fe.backCallback()
+			if filesReceived > 0 {
+				addLog("🔨 Construction avec les éléments reçus...")
+				fe.buildTreeStructure()
+				// Appeler showDirectoryUI sur le thread principal
+				fe.win.Canvas().Refresh(fe.win.Canvas().Content())
+				time.Sleep(50 * time.Millisecond)
+				fe.safeShowDirectoryUI()
+			} else {
+				fe.backCallback()
+			}
 			return
+
+		case treeItem, ok := <-fe.client.treeItemsChan:
+			if !ok {
+				addLog("❌ Channel fermé")
+				*stopLoading = true
+				fe.client.explorerActive = false
+				fe.backCallback()
+				return
+			}
 			
-		case treeItem := <-fe.client.treeItemsChan:
 			if treeItem.Type == "file_tree_item" {
 				item := &FileTreeItem{
 					Path:     treeItem.Path,
@@ -155,7 +215,7 @@ func (fe *FileExplorer) requestAndBuildTree(stopLoading *bool, progressLabel *wi
 				}
 				fe.allItems[item.Path] = item
 				filesReceived++
-				
+
 				if filesReceived%10 == 0 || filesReceived < 10 {
 					progressLabel.SetText(fmt.Sprintf("Fichiers scannés : %d", filesReceived))
 					progressLabel.Refresh()
@@ -166,16 +226,33 @@ func (fe *FileExplorer) requestAndBuildTree(stopLoading *bool, progressLabel *wi
 				fe.client.explorerActive = false
 				addLog(fmt.Sprintf("✅ Structure complète chargée: %d éléments", filesReceived))
 				fe.buildTreeStructure()
-				fe.showDirectoryUI()
+				// Appeler showDirectoryUI sur le thread principal avec un petit délai
+				time.Sleep(50 * time.Millisecond)
+				fe.safeShowDirectoryUI()
 				return
 			}
 		}
 	}
 }
 
+// safeShowDirectoryUI appelle showDirectoryUI de manière sécurisée
+func (fe *FileExplorer) safeShowDirectoryUI() {
+	// Récupérer les panics potentiels
+	defer func() {
+		if r := recover(); r != nil {
+			addLog(fmt.Sprintf("❌ Erreur UI récupérée: %v", r))
+		}
+	}()
+	
+	// Petit délai pour laisser le temps au thread UI
+	time.Sleep(100 * time.Millisecond)
+	
+	fe.showDirectoryUI()
+}
+
 func (fe *FileExplorer) buildTreeStructure() {
 	addLog("🔨 Construction de l'arborescence...")
-	
+
 	fe.rootDir = &FileTreeItem{
 		Path:     "",
 		Name:     "Spiralydata",
@@ -183,25 +260,39 @@ func (fe *FileExplorer) buildTreeStructure() {
 		Children: []*FileTreeItem{},
 	}
 	fe.allItems[""] = fe.rootDir
-	
+
+	// S'assurer que tous les items ont Children initialisé
+	for _, item := range fe.allItems {
+		if item.Children == nil {
+			item.Children = []*FileTreeItem{}
+		}
+	}
+
 	for path, item := range fe.allItems {
 		if path == "" {
 			continue
 		}
-		
+
 		parentPath := filepath.Dir(path)
 		parentPath = filepath.ToSlash(parentPath)
-		
+
 		if parentPath == "." {
 			parentPath = ""
 		}
-		
+
 		if parent, exists := fe.allItems[parentPath]; exists {
 			item.Parent = parent
+			if parent.Children == nil {
+				parent.Children = []*FileTreeItem{}
+			}
 			parent.Children = append(parent.Children, item)
+		} else {
+			// Si le parent n'existe pas, ajouter à la racine
+			item.Parent = fe.rootDir
+			fe.rootDir.Children = append(fe.rootDir.Children, item)
 		}
 	}
-	
+
 	for _, item := range fe.allItems {
 		if item.IsDir && len(item.Children) > 0 {
 			sort.Slice(item.Children, func(i, j int) bool {
@@ -212,127 +303,462 @@ func (fe *FileExplorer) buildTreeStructure() {
 			})
 		}
 	}
-	
+
 	fe.currentDir = fe.rootDir
 	fe.treeLoaded = true
+	addLog(fmt.Sprintf("✅ Arborescence construite: %d éléments, %d dans la racine",
+		len(fe.allItems), len(fe.rootDir.Children)))
 }
 
 func (fe *FileExplorer) showDirectoryUI() {
+	addLog("🖥️ Affichage de l'explorateur...")
+	
+	defer func() {
+		if r := recover(); r != nil {
+			addLog(fmt.Sprintf("❌ Panic récupéré dans showDirectoryUI: %v", r))
+		}
+	}()
+
+	// Vérifications de sécurité
+	if fe.currentDir == nil {
+		addLog("❌ Erreur: currentDir est nil")
+		if fe.rootDir != nil {
+			fe.currentDir = fe.rootDir
+		} else {
+			fe.backCallback()
+			return
+		}
+	}
+
+	if fe.settings == nil {
+		fe.settings = NewExplorerSettings()
+	}
+
 	currentPath := fe.currentDir.Path
 	if currentPath == "" {
 		currentPath = "/"
 	}
-	
-	title := widget.NewLabelWithStyle(fmt.Sprintf("📁 %s", currentPath), fyne.TextAlignCenter, fyne.TextStyle{Bold: true})
-	
-	selectAllBtn := widget.NewButton("Tout sélectionner", func() {
+
+	// S'assurer que Children n'est pas nil
+	if fe.currentDir.Children == nil {
+		fe.currentDir.Children = []*FileTreeItem{}
+	}
+
+	// Breadcrumb navigation
+	breadcrumb := NewBreadcrumb(func(index int) {
+		if index == -1 {
+			if fe.rootDir != nil {
+				fe.currentDir = fe.rootDir
+			}
+		} else {
+			parts := fe.getPathParts()
+			if index < len(parts) {
+				targetPath := ""
+				for i := 0; i <= index; i++ {
+					if targetPath == "" {
+						targetPath = parts[i]
+					} else {
+						targetPath = targetPath + "/" + parts[i]
+					}
+				}
+				if item, exists := fe.allItems[targetPath]; exists {
+					fe.currentDir = item
+				}
+			}
+		}
+		fe.showDirectoryUI()
+	})
+	breadcrumb.SetPath(fe.getPathParts())
+
+	// Barre de recherche
+	searchEntry := widget.NewEntry()
+	searchEntry.SetPlaceHolder("🔍 Rechercher...")
+	searchEntry.OnChanged = func(query string) {
+		fe.filterItems(query)
+	}
+
+	// Contrôles de tri - créer SANS callback d'abord pour éviter la boucle
+	sortMenu := widget.NewSelect([]string{"Nom", "Taille", "Date", "Type"}, nil)
+	sortMenu.SetSelected(fe.settings.GetSortFieldName())
+	// Ajouter le callback APRÈS SetSelected
+	sortMenu.OnChanged = func(selected string) {
+		switch selected {
+		case "Nom":
+			fe.settings.SortField = SortByName
+		case "Taille":
+			fe.settings.SortField = SortBySize
+		case "Date":
+			fe.settings.SortField = SortByDate
+		case "Type":
+			fe.settings.SortField = SortByType
+		}
+		fe.showDirectoryUI()
+	}
+
+	sortOrderBtn := widget.NewButton(fe.settings.GetSortOrderIcon(), func() {
+		fe.settings.ToggleSortOrder()
+		fe.showDirectoryUI()
+	})
+	sortOrderBtn.Importance = widget.LowImportance
+
+	// Bouton favori
+	favIcon := "☆"
+	if fe.settings.IsFavorite(currentPath) {
+		favIcon = "⭐"
+	}
+	favBtn := widget.NewButton(favIcon, func() {
+		if fe.settings.IsFavorite(currentPath) {
+			fe.settings.RemoveFavorite(currentPath)
+		} else {
+			fe.settings.AddFavorite(currentPath)
+		}
+		fe.showDirectoryUI()
+	})
+	favBtn.Importance = widget.LowImportance
+
+	// Compteur
+	fileCount := len(fe.currentDir.Children)
+	countLabel := widget.NewLabel(fmt.Sprintf("📊 %d éléments", fileCount))
+
+	// Boutons sélection
+	selectAllBtn := widget.NewButton("☑️ Tout", func() {
 		fe.mu.Lock()
 		for _, item := range fe.currentDir.Children {
-			fe.selectedItems[item.Path] = true
+			if item != nil {
+				fe.selectedItems[item.Path] = true
+			}
 		}
 		fe.mu.Unlock()
 		fe.showDirectoryUI()
 	})
-	
-	deselectAllBtn := widget.NewButton("Tout désélectionner", func() {
+	selectAllBtn.Importance = widget.LowImportance
+
+	deselectAllBtn := widget.NewButton("☐ Aucun", func() {
 		fe.mu.Lock()
 		for _, item := range fe.currentDir.Children {
-			fe.selectedItems[item.Path] = false
+			if item != nil {
+				fe.selectedItems[item.Path] = false
+			}
 		}
 		fe.mu.Unlock()
 		fe.showDirectoryUI()
 	})
-	
-	parentBtn := widget.NewButton("⬆️ Dossier parent", func() {
-		if fe.currentDir.Parent != nil {
+	deselectAllBtn.Importance = widget.LowImportance
+
+	// Bouton parent
+	parentBtn := widget.NewButton("⬆️", func() {
+		if fe.currentDir != nil && fe.currentDir.Parent != nil {
 			fe.currentDir = fe.currentDir.Parent
 			fe.showDirectoryUI()
 		}
 	})
-	
+	parentBtn.Importance = widget.MediumImportance
 	if fe.currentDir.Parent == nil {
 		parentBtn.Disable()
 	}
-	
-	// Bouton de suppression du dossier actuel
-	deleteBtn := widget.NewButton("Delete Directory", func() {
+
+	// Bouton suppression dossier
+	deleteBtn := widget.NewButton("🗑️", func() {
 		fe.confirmDeleteDirectory()
 	})
 	deleteBtn.Importance = widget.DangerImportance
-	
-	// Le bouton de suppression n'est visible que si on n'est pas à la racine
-	var selectionBar *fyne.Container
+
+	// Bouton refresh
+	refreshBtn := widget.NewButton("🔄", func() {
+		fe.treeLoaded = false
+		fe.Show()
+	})
+	refreshBtn.Importance = widget.LowImportance
+
+	// Barre d'outils
+	toolBar := container.NewHBox(
+		parentBtn,
+		refreshBtn,
+		favBtn,
+		widget.NewSeparator(),
+		widget.NewLabel("Tri:"),
+		sortMenu,
+		sortOrderBtn,
+	)
 	if fe.currentDir.Parent != nil {
-		selectionBar = container.NewHBox(
-			parentBtn,
-			deleteBtn,
-			layout.NewSpacer(),
-			selectAllBtn,
-			deselectAllBtn,
-		)
-	} else {
-		selectionBar = container.NewHBox(
-			parentBtn,
-			layout.NewSpacer(),
-			selectAllBtn,
-			deselectAllBtn,
-		)
+		toolBar.Add(widget.NewSeparator())
+		toolBar.Add(deleteBtn)
 	}
-	
+
+	// Barre de sélection
+	selectionBar := container.NewHBox(
+		countLabel,
+		layout.NewSpacer(),
+		selectAllBtn,
+		deselectAllBtn,
+	)
+
+	// Trier les éléments
+	sortedChildren := fe.settings.SortItems(fe.currentDir.Children)
+
+	// Contenu de l'arborescence
 	treeContent := container.NewVBox()
-	
-	for _, item := range fe.currentDir.Children {
-		fe.addItemToList(treeContent, item)
+	for _, item := range sortedChildren {
+		if item == nil {
+			continue
+		}
+		
+		icon := getFileIcon(item.Name, item.IsDir)
+		displayName := icon + " " + item.Name
+		
+		itemPath := item.Path
+		itemIsDir := item.IsDir
+		itemRef := item
+		itemName := item.Name
+
+		fe.mu.Lock()
+		isSelected := fe.selectedItems[itemPath]
+		fe.mu.Unlock()
+
+		check := widget.NewCheck(displayName, func(checked bool) {
+			fe.mu.Lock()
+			fe.selectedItems[itemPath] = checked
+			fe.mu.Unlock()
+		})
+		check.SetChecked(isSelected)
+
+		row := container.NewHBox(check, layout.NewSpacer())
+
+		if itemIsDir {
+			openBtn := widget.NewButton("Ouvrir", func() {
+				fe.currentDir = itemRef
+				fe.showDirectoryUI()
+			})
+			openBtn.Importance = widget.LowImportance
+			row.Add(openBtn)
+		} else {
+			// Bouton aperçu pour fichiers supportés
+			if CanPreview(itemName) {
+				previewBtn := widget.NewButton("👁️", func() {
+					fe.showFilePreview(itemPath)
+				})
+				previewBtn.Importance = widget.LowImportance
+				row.Add(previewBtn)
+			}
+		}
+
+		treeContent.Add(row)
 	}
-	
-	if len(fe.currentDir.Children) == 0 {
-		emptyLabel := widget.NewLabel("Ce dossier est vide")
+
+	if len(sortedChildren) == 0 {
+		emptyLabel := widget.NewLabel("📂 Ce dossier est vide")
 		emptyLabel.Alignment = fyne.TextAlignCenter
 		treeContent.Add(emptyLabel)
 	}
-	
+
 	treeScroll := container.NewVScroll(treeContent)
-	treeScroll.SetMinSize(fyne.NewSize(500, 400))
-	
-	downloadBtn := widget.NewButton("⬇️ Télécharger la sélection", func() {
+	treeScroll.SetMinSize(fyne.NewSize(450, 350))
+
+	// Boutons action
+	downloadBtn := widget.NewButton("⬇️ Télécharger", func() {
 		fe.showDownloadOptions()
 	})
 	downloadBtn.Importance = widget.HighImportance
-	
-	backBtn := widget.NewButton("Retour", func() {
+
+	backBtn := widget.NewButton("⬅️ Retour", func() {
 		fe.backCallback()
 	})
-	
+
+	// Compter sélection
+	selectedCount := 0
+	fe.mu.Lock()
+	for _, selected := range fe.selectedItems {
+		if selected {
+			selectedCount++
+		}
+	}
+	fe.mu.Unlock()
+	selectedLabel := widget.NewLabel(fmt.Sprintf("✓ %d sélectionnés", selectedCount))
+
+	// Panneau favoris (sidebar gauche)
+	var favoritesPanel fyne.CanvasObject
+	if len(fe.settings.Favorites) > 0 {
+		favList := container.NewVBox()
+		favList.Add(widget.NewLabelWithStyle("⭐ Favoris", fyne.TextAlignLeading, fyne.TextStyle{Bold: true}))
+		for _, fav := range fe.settings.Favorites {
+			favPath := fav
+			favName := filepath.Base(fav)
+			if favName == "" || favName == "/" || favName == "." {
+				favName = "Racine"
+			}
+			btn := widget.NewButton("📁 "+favName, func() {
+				if item, exists := fe.allItems[favPath]; exists {
+					fe.currentDir = item
+					fe.showDirectoryUI()
+				} else if favPath == "" {
+					fe.currentDir = fe.rootDir
+					fe.showDirectoryUI()
+				}
+			})
+			btn.Importance = widget.LowImportance
+			favList.Add(btn)
+		}
+		favoritesPanel = container.NewVBox(favList, widget.NewSeparator())
+	}
+
+	// Layout principal
 	mainContent := container.NewBorder(
 		container.NewVBox(
-			title,
+			breadcrumb.GetContainer(),
 			widget.NewSeparator(),
+			searchEntry,
+			widget.NewSeparator(),
+			toolBar,
 			selectionBar,
 			widget.NewSeparator(),
 		),
 		container.NewVBox(
 			widget.NewSeparator(),
 			container.NewHBox(
-				downloadBtn,
+				selectedLabel,
 				layout.NewSpacer(),
+				downloadBtn,
 				backBtn,
 			),
 		),
-		nil,
+		favoritesPanel,
 		nil,
 		treeScroll,
 	)
-	
-	split := container.NewHSplit(
-		mainContent,
-		container.NewBorder(
+
+	// Split avec logs
+	var logPanel fyne.CanvasObject
+	if logWidget != nil {
+		logPanel = container.NewBorder(
 			widget.NewLabelWithStyle("📋 Logs", fyne.TextAlignCenter, fyne.TextStyle{Bold: true}),
 			nil, nil, nil,
 			container.NewVScroll(logWidget),
-		),
+		)
+	} else {
+		logPanel = widget.NewLabel("Logs")
+	}
+	
+	split := container.NewHSplit(
+		container.NewPadded(mainContent),
+		logPanel,
 	)
 	split.Offset = 0.5
-	
+
+	fe.win.SetContent(split)
+	addLog("✅ Explorateur affiché")
+}
+
+// showFilePreview affiche la prévisualisation d'un fichier
+func (fe *FileExplorer) showFilePreview(relativePath string) {
+	addLog(fmt.Sprintf("👁️ Prévisualisation: %s", relativePath))
+
+	tempDir := os.TempDir()
+	tempFile := filepath.Join(tempDir, "spiraly_preview_"+filepath.Base(relativePath))
+
+	fe.client.downloadChan = make(chan FileChange, 10)
+	fe.client.downloadActive = true
+
+	reqMsg := map[string]interface{}{
+		"type":   "download_request",
+		"origin": "client",
+		"items":  []string{relativePath},
+	}
+
+	if err := fe.client.WriteJSONSafe(reqMsg); err != nil {
+		addLog(fmt.Sprintf("❌ Erreur demande preview: %v", err))
+		fe.client.downloadActive = false
+		return
+	}
+
+	go func() {
+		defer func() {
+			fe.client.downloadActive = false
+			if r := recover(); r != nil {
+				addLog(fmt.Sprintf("❌ Panic dans preview: %v", r))
+			}
+		}()
+
+		timeout := time.After(30 * time.Second)
+		select {
+		case <-timeout:
+			addLog("⏱️ Timeout prévisualisation")
+			return
+		case msg := <-fe.client.downloadChan:
+			if msg.Content == "" {
+				addLog("❌ Fichier vide reçu")
+				return
+			}
+
+			data, err := base64.StdEncoding.DecodeString(msg.Content)
+			if err != nil {
+				addLog(fmt.Sprintf("❌ Erreur décodage: %v", err))
+				return
+			}
+
+			if err := os.WriteFile(tempFile, data, 0644); err != nil {
+				addLog(fmt.Sprintf("❌ Erreur écriture temp: %v", err))
+				return
+			}
+
+			addLog("✅ Fichier téléchargé, affichage preview...")
+			fe.showPreviewPanel(tempFile, relativePath)
+		}
+	}()
+}
+
+// showPreviewPanel affiche le panneau de prévisualisation
+func (fe *FileExplorer) showPreviewPanel(localPath, originalPath string) {
+	addLog(fmt.Sprintf("🖼️ Affichage preview: %s", originalPath))
+
+	// Vérification de sécurité
+	if fe.currentDir == nil {
+		addLog("❌ currentDir est nil dans showPreviewPanel")
+		return
+	}
+
+	previewPanel := NewPreviewPanel(fe.win, func() {
+		os.Remove(localPath)
+		fe.showDirectoryUI()
+	})
+
+	previewContent := previewPanel.ShowPreview(localPath)
+
+	// Layout avec explorateur réduit et preview
+	treeContent := container.NewVBox()
+	if fe.currentDir.Children != nil {
+		for _, item := range fe.currentDir.Children {
+			if item == nil {
+				continue
+			}
+			icon := getFileIcon(item.Name, item.IsDir)
+			lbl := widget.NewLabel(icon + " " + item.Name)
+			treeContent.Add(lbl)
+		}
+	}
+
+	backToLogsBtn := widget.NewButton("⬅️ Retour aux logs", func() {
+		os.Remove(localPath)
+		fe.showDirectoryUI()
+	})
+
+	dirName := fe.currentDir.Name
+	if dirName == "" {
+		dirName = "Racine"
+	}
+
+	explorerMini := container.NewBorder(
+		widget.NewLabelWithStyle("📂 "+dirName, fyne.TextAlignCenter, fyne.TextStyle{Bold: true}),
+		backToLogsBtn,
+		nil, nil,
+		container.NewVScroll(treeContent),
+	)
+
+	split := container.NewHSplit(
+		container.NewPadded(explorerMini),
+		previewContent,
+	)
+	split.Offset = 0.3
+
 	fe.win.SetContent(split)
 }
 
@@ -372,7 +798,7 @@ func (fe *FileExplorer) confirmDeleteDirectory() {
 
 func (fe *FileExplorer) deleteDirectory(dirPath string) {
 	addLog(fmt.Sprintf("🗑️ Suppression du dossier : %s", dirPath))
-	
+
 	// Envoyer la commande de suppression au serveur
 	change := FileChange{
 		FileName: dirPath,
@@ -380,21 +806,19 @@ func (fe *FileExplorer) deleteDirectory(dirPath string) {
 		IsDir:    true,
 		Origin:   "client",
 	}
-	
-	fe.client.mu.Lock()
-	err := fe.client.ws.WriteJSON(change)
-	fe.client.mu.Unlock()
-	
+
+	err := fe.client.WriteJSONSafe(change)
+
 	if err != nil {
 		addLog(fmt.Sprintf("❌ Erreur suppression : %v", err))
 		dialog.ShowError(fmt.Errorf("Impossible de supprimer le dossier"), fe.win)
 		return
 	}
-	
+
 	addLog("✅ Commande de suppression envoyée")
-	
-	time.Sleep(300 * time.Millisecond)
-	
+
+	time.Sleep(200 * time.Millisecond)
+
 	// Supprimer le dossier de l'arborescence locale
 	fe.removeDirectoryFromTree(dirPath)
 	
@@ -506,6 +930,53 @@ func (fe *FileExplorer) addItemToList(parent *fyne.Container, item *FileTreeItem
 	parent.Add(itemContainer)
 }
 
+// addItemToListWithPreview ajoute un élément avec bouton de prévisualisation
+func (fe *FileExplorer) addItemToListWithPreview(parent *fyne.Container, item *FileTreeItem) {
+	if item == nil {
+		return
+	}
+
+	// Icône basée sur le type de fichier
+	icon := getFileIcon(item.Name, item.IsDir)
+
+	displayName := icon + " " + item.Name
+
+	// Vérifier si sélectionné
+	fe.mu.Lock()
+	isSelected := fe.selectedItems[item.Path]
+	fe.mu.Unlock()
+
+	// Variables locales pour éviter les problèmes de closure
+	itemPath := item.Path
+	itemIsDir := item.IsDir
+	itemRef := item
+
+	// Checkbox
+	check := widget.NewCheck(displayName, func(checked bool) {
+		fe.mu.Lock()
+		fe.selectedItems[itemPath] = checked
+		fe.mu.Unlock()
+	})
+	check.SetChecked(isSelected)
+
+	// Conteneur
+	itemContainer := container.NewHBox()
+	itemContainer.Add(check)
+	itemContainer.Add(layout.NewSpacer())
+
+	if itemIsDir {
+		// Bouton ouvrir pour les dossiers
+		openBtn := widget.NewButton("Ouvrir", func() {
+			fe.currentDir = itemRef
+			fe.showDirectoryUI()
+		})
+		openBtn.Importance = widget.LowImportance
+		itemContainer.Add(openBtn)
+	}
+
+	parent.Add(itemContainer)
+}
+
 func (fe *FileExplorer) showDownloadOptions() {
 	selected := fe.getSelectedItems()
 	
@@ -581,29 +1052,27 @@ func (fe *FileExplorer) downloadToCustomDir(items []string) {
 
 func (fe *FileExplorer) performDownload(items []string, targetDir string) {
 	addLog("📥 Début du téléchargement...")
-	
+
 	expandedItems := fe.expandDirectories(items)
-	
+
 	addLog(fmt.Sprintf("📦 %d fichiers/dossiers à télécharger", len(expandedItems)))
-	
+
 	fe.client.downloadActive = true
 	fe.client.downloadChan = make(chan FileChange, 100)
-	
+
 	reqMsg := DownloadRequest{
 		Type:  "download_request",
 		Items: expandedItems,
 	}
-	
-	fe.client.mu.Lock()
-	err := fe.client.ws.WriteJSON(reqMsg)
-	fe.client.mu.Unlock()
-	
+
+	err := fe.client.WriteJSONSafe(reqMsg)
+
 	if err != nil {
 		addLog(fmt.Sprintf("❌ Erreur envoi requête: %v", err))
 		fe.client.downloadActive = false
 		return
 	}
-	
+
 	downloaded := 0
 	timeout := time.After(120 * time.Second)
 	lastUpdate := time.Now()
@@ -666,28 +1135,83 @@ func (fe *FileExplorer) expandDirectoryRecursive(path string, expanded map[strin
 func (fe *FileExplorer) saveDownloadedFile(msg FileChange, targetDir string) {
 	normalizedPath := filepath.FromSlash(msg.FileName)
 	targetPath := filepath.Join(targetDir, normalizedPath)
-	
+
 	switch msg.Op {
 	case "mkdir":
 		if err := os.MkdirAll(targetPath, 0755); err != nil {
 			addLog(fmt.Sprintf("❌ Erreur création dossier %s: %v", msg.FileName, err))
 		}
-		
+
 	case "create", "write":
 		dir := filepath.Dir(targetPath)
 		if err := os.MkdirAll(dir, 0755); err != nil {
 			addLog(fmt.Sprintf("❌ Erreur création répertoire: %v", err))
 			return
 		}
-		
+
 		data, err := base64.StdEncoding.DecodeString(msg.Content)
 		if err != nil {
 			addLog(fmt.Sprintf("❌ Erreur décodage %s: %v", msg.FileName, err))
 			return
 		}
-		
+
 		if err := os.WriteFile(targetPath, data, 0644); err != nil {
 			addLog(fmt.Sprintf("❌ Erreur écriture %s: %v", msg.FileName, err))
 		}
+	}
+}
+
+// getPathParts retourne les parties du chemin actuel pour le breadcrumb
+func (fe *FileExplorer) getPathParts() []string {
+	if fe.currentDir == nil || fe.currentDir.Path == "" {
+		return []string{}
+	}
+
+	parts := strings.Split(fe.currentDir.Path, "/")
+	var result []string
+	for _, part := range parts {
+		if part != "" {
+			result = append(result, part)
+		}
+	}
+	return result
+}
+
+// filterItems filtre les éléments affichés
+func (fe *FileExplorer) filterItems(query string) {
+	if query != "" {
+		addLog(fmt.Sprintf("🔍 Recherche: %s", query))
+	}
+}
+
+// getFileIcon retourne une icône basée sur l'extension
+func getFileIcon(name string, isDir bool) string {
+	if isDir {
+		return "📁"
+	}
+	ext := strings.ToLower(filepath.Ext(name))
+	switch ext {
+	case ".txt", ".md", ".log":
+		return "📄"
+	case ".go", ".py", ".js", ".ts", ".java", ".c", ".cpp", ".h":
+		return "💻"
+	case ".html", ".css", ".xml", ".json":
+		return "🌐"
+	case ".jpg", ".jpeg", ".png", ".gif", ".bmp", ".svg":
+		return "🖼️"
+	case ".mp3", ".wav", ".flac", ".aac":
+		return "🎵"
+	case ".mp4", ".avi", ".mkv", ".mov":
+		return "🎬"
+	case ".zip", ".tar", ".gz", ".rar":
+		return "📦"
+	case ".pdf":
+		return "📕"
+	case ".doc", ".docx":
+		return "📘"
+	case ".xls", ".xlsx":
+		return "📊"
+	default:
+		return "📄"
 	}
 }

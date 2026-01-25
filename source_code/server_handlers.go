@@ -21,27 +21,41 @@ func (s *Server) sendAllFilesAndDirs(ws *websocket.Conn) {
 
 func (s *Server) sendFileTree(ws *websocket.Conn) {
 	addLog("📂 Envoi de l'arborescence des fichiers...")
-	time.Sleep(200 * time.Millisecond)
-	s.sendTreeRecursive(ws, s.WatchDir, "")
+	addLog(fmt.Sprintf("📂 Dossier surveillé: %s", s.WatchDir))
 	
+	// Vérifier que le dossier existe
+	if _, err := os.Stat(s.WatchDir); os.IsNotExist(err) {
+		addLog(fmt.Sprintf("❌ Le dossier n'existe pas: %s", s.WatchDir))
+		ws.WriteJSON(FileTreeItemMessage{
+			Type: "file_tree_complete",
+		})
+		return
+	}
+	
+	time.Sleep(200 * time.Millisecond)
+	count := s.sendTreeRecursiveCount(ws, s.WatchDir, "", 0)
+	
+	addLog(fmt.Sprintf("📂 %d éléments envoyés", count))
+
 	ws.WriteJSON(FileTreeItemMessage{
 		Type: "file_tree_complete",
 	})
-	
-	time.Sleep(300 * time.Millisecond)
+
+	time.Sleep(100 * time.Millisecond)
 	addLog("✅ Arborescence envoyée")
 }
 
-func (s *Server) sendTreeRecursive(ws *websocket.Conn, basePath, relPath string) {
+func (s *Server) sendTreeRecursiveCount(ws *websocket.Conn, basePath, relPath string, count int) int {
 	fullPath := filepath.Join(basePath, relPath)
 	entries, err := os.ReadDir(fullPath)
 	if err != nil {
-		return
+		addLog(fmt.Sprintf("⚠️ Erreur lecture dossier %s: %v", fullPath, err))
+		return count
 	}
 
 	var dirs []os.DirEntry
 	var files []os.DirEntry
-	
+
 	for _, entry := range entries {
 		if entry.IsDir() {
 			dirs = append(dirs, entry)
@@ -49,42 +63,52 @@ func (s *Server) sendTreeRecursive(ws *websocket.Conn, basePath, relPath string)
 			files = append(files, entry)
 		}
 	}
-	
+
 	for i, entry := range dirs {
 		itemRelPath := filepath.ToSlash(filepath.Join(relPath, entry.Name()))
-		
-		ws.WriteJSON(FileTreeItemMessage{
+
+		err := ws.WriteJSON(FileTreeItemMessage{
 			Type:  "file_tree_item",
 			Path:  itemRelPath,
 			Name:  entry.Name(),
 			IsDir: true,
 		})
-		
-		time.Sleep(50 * time.Millisecond)
-		
-		if i > 0 && i%5 == 0 {
-			time.Sleep(100 * time.Millisecond)
+		if err != nil {
+			addLog(fmt.Sprintf("⚠️ Erreur envoi dossier %s: %v", itemRelPath, err))
 		}
-		
-		s.sendTreeRecursive(ws, basePath, itemRelPath)
+		count++
+
+		time.Sleep(30 * time.Millisecond)
+
+		if i > 0 && i%5 == 0 {
+			time.Sleep(50 * time.Millisecond)
+		}
+
+		count = s.sendTreeRecursiveCount(ws, basePath, itemRelPath, count)
 	}
-	
+
 	for i, entry := range files {
 		itemRelPath := filepath.ToSlash(filepath.Join(relPath, entry.Name()))
-		
-		ws.WriteJSON(FileTreeItemMessage{
+
+		err := ws.WriteJSON(FileTreeItemMessage{
 			Type:  "file_tree_item",
 			Path:  itemRelPath,
 			Name:  entry.Name(),
 			IsDir: false,
 		})
-		
-		time.Sleep(30 * time.Millisecond)
-		
+		if err != nil {
+			addLog(fmt.Sprintf("⚠️ Erreur envoi fichier %s: %v", itemRelPath, err))
+		}
+		count++
+
+		time.Sleep(20 * time.Millisecond)
+
 		if i > 0 && i%10 == 0 {
-			time.Sleep(50 * time.Millisecond)
+			time.Sleep(30 * time.Millisecond)
 		}
 	}
+	
+	return count
 }
 
 func (s *Server) sendSelectedFiles(ws *websocket.Conn, items []string) {

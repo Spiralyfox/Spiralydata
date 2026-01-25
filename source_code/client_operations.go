@@ -17,17 +17,17 @@ func (c *Client) PullAllFromServer() {
 		addLog("⏳ Opération en cours...")
 		return
 	}
-	
+
 	c.isProcessing = true
-	time.Sleep(200 * time.Millisecond)
-	
+	time.Sleep(100 * time.Millisecond)
+
 	c.pendingMu.Lock()
 	pendingCount := len(c.pendingChanges)
 	if pendingCount > 0 {
 		addLog(fmt.Sprintf("📦 Traitement de %d changements en attente...", pendingCount))
 		applied := 0
 		skipped := 0
-		
+
 		for _, change := range c.pendingChanges {
 			if c.shouldApplyChange(change) {
 				c.applyChange(change)
@@ -35,13 +35,13 @@ func (c *Client) PullAllFromServer() {
 			} else {
 				skipped++
 			}
-			
+
 			if applied > 0 && applied%20 == 0 {
-				time.Sleep(100 * time.Millisecond)
+				time.Sleep(50 * time.Millisecond)
 			}
 		}
 		c.pendingChanges = []FileChange{}
-		
+
 		if skipped > 0 {
 			addLog(fmt.Sprintf("⭐ %d fichiers ignorés (déjà à jour)", skipped))
 		}
@@ -52,22 +52,22 @@ func (c *Client) PullAllFromServer() {
 		addLog("ℹ️ Aucun changement en attente")
 	}
 	c.pendingMu.Unlock()
-	
-	time.Sleep(300 * time.Millisecond)
-	
+
+	time.Sleep(100 * time.Millisecond)
+
 	addLog("🔄 Demande des fichiers au serveur...")
-	
+
 	reqMsg := map[string]string{
 		"type":   "request_all_files",
 		"origin": "client",
 	}
-	
-	if err := c.ws.WriteJSON(reqMsg); err != nil {
+
+	if err := c.WriteJSONSafe(reqMsg); err != nil {
 		addLog("❌ Erreur envoi")
 		c.isProcessing = false
 		return
 	}
-	
+
 	go func() {
 		time.Sleep(4 * time.Second)
 		c.isProcessing = false
@@ -109,114 +109,275 @@ func (c *Client) PushLocalChanges() {
 		addLog("⏳ Opération en cours...")
 		return
 	}
-	
+
 	c.isProcessing = true
-	addLog("📤 Envoi au serveur...")
-	
-	time.Sleep(200 * time.Millisecond)
-	
+	addLog("📤 Analyse des fichiers locaux...")
+
+	// Réinitialiser le compteur de fichiers ignorés
+	filterConfig := GetFilterConfig()
+	filterConfig.Filters.Extension.ResetIgnoredCount()
+
+	// Pause pour laisser l'UI se rafraîchir
+	time.Sleep(100 * time.Millisecond)
+
+	// Scanner l'état actuel
 	allFiles := make(map[string]time.Time)
 	allDirs := make(map[string]time.Time)
 	c.scanCurrentState(c.localDir, "", allFiles, allDirs)
-	
-	sent := 0
-	
-	c.mu.Lock()
-	for knownDir := range c.knownDirs {
-		if _, exists := allDirs[knownDir]; !exists {
-			change := FileChange{
-				FileName: knownDir,
-				Op:       "remove",
-				IsDir:    true,
-				Origin:   "client",
-			}
-			c.ws.WriteJSON(change)
-			delete(c.knownDirs, knownDir)
-			sent++
-			time.Sleep(150 * time.Millisecond)
+
+	// Filtrer les fichiers et dossiers
+	filteredFiles := make(map[string]time.Time)
+	filteredDirs := make(map[string]time.Time)
+	filteredCount := 0
+
+	for dirPath, modTime := range allDirs {
+		if !filterConfig.Filters.Path.ShouldFilter(dirPath) {
+			filteredDirs[dirPath] = modTime
+		} else {
+			filteredCount++
 		}
 	}
-	
-	for knownFile := range c.knownFiles {
-		if _, exists := allFiles[knownFile]; !exists {
-			change := FileChange{
-				FileName: knownFile,
-				Op:       "remove",
-				IsDir:    false,
-				Origin:   "client",
-			}
-			c.ws.WriteJSON(change)
-			delete(c.knownFiles, knownFile)
-			sent++
-			time.Sleep(150 * time.Millisecond)
+
+	for filePath, modTime := range allFiles {
+		fullPath := filepath.Join(c.localDir, filepath.FromSlash(filePath))
+		info, err := os.Stat(fullPath)
+		size := int64(0)
+		if err == nil {
+			size = info.Size()
+		}
+
+		if !filterConfig.ShouldFilterFile(filePath, size, false) {
+			filteredFiles[filePath] = modTime
+		} else {
+			filteredCount++
+		}
+	}
+
+	if filteredCount > 0 {
+		addLog(fmt.Sprintf("🔍 %d fichiers/dossiers ignorés (filtres actifs)", filteredCount))
+	}
+
+	// Demander l'état du serveur pour comparaison
+	serverFiles, serverDirs := c.getServerState()
+
+	var newFiles []string
+	var modifiedFiles []string
+	var newDirs []string
+	var deletedFiles []string
+	var deletedDirs []string
+
+	// Détecter les nouveaux dossiers et dossiers supprimés
+	for dirPath := range filteredDirs {
+		if _, existsOnServer := serverDirs[dirPath]; !existsOnServer {
+			newDirs = append(newDirs, dirPath)
+		}
+	}
+
+	// Détecter les dossiers supprimés localement
+	c.mu.Lock()
+	for knownDir := range c.knownDirs {
+		if _, exists := filteredDirs[knownDir]; !exists {
+			deletedDirs = append(deletedDirs, knownDir)
 		}
 	}
 	c.mu.Unlock()
-	
-	for i, dirPath := range getSortedKeys(allDirs) {
+
+	// Détecter les nouveaux fichiers et fichiers modifiés
+	for filePath, modTime := range filteredFiles {
 		c.mu.Lock()
-		_, known := c.knownDirs[dirPath]
+		lastMod, known := c.knownFiles[filePath]
 		c.mu.Unlock()
-		
-		if !known {
-			change := FileChange{
-				FileName: dirPath,
-				Op:       "mkdir",
-				IsDir:    true,
-				Origin:   "client",
-			}
-			c.ws.WriteJSON(change)
+
+		_, existsOnServer := serverFiles[filePath]
+
+		if !existsOnServer && !known {
+			// Nouveau fichier qui n'existe pas sur le serveur
+			newFiles = append(newFiles, filePath)
+		} else if known && modTime.After(lastMod) {
+			// Fichier modifié localement
+			modifiedFiles = append(modifiedFiles, filePath)
+		} else if !existsOnServer {
+			// Fichier connu localement mais absent du serveur
+			newFiles = append(newFiles, filePath)
+		}
+	}
+
+	// Détecter les fichiers supprimés localement
+	c.mu.Lock()
+	for knownFile := range c.knownFiles {
+		if _, exists := allFiles[knownFile]; !exists {
+			deletedFiles = append(deletedFiles, knownFile)
+		}
+	}
+	c.mu.Unlock()
+
+	// Afficher le résumé
+	totalOps := len(newDirs) + len(newFiles) + len(modifiedFiles) + len(deletedDirs) + len(deletedFiles)
+	if totalOps == 0 {
+		addLog("✅ Aucune modification à envoyer")
+		c.isProcessing = false
+		return
+	}
+
+	addLog(fmt.Sprintf("📊 Résumé: %d dossiers, %d nouveaux fichiers, %d modifiés, %d supprimés",
+		len(newDirs), len(newFiles), len(modifiedFiles), len(deletedDirs)+len(deletedFiles)))
+
+	sent := 0
+
+	// 1. Envoyer les suppressions de dossiers
+	for _, dirPath := range deletedDirs {
+		change := FileChange{
+			FileName: dirPath,
+			Op:       "remove",
+			IsDir:    true,
+			Origin:   "client",
+		}
+		if err := c.WriteJSONSafe(change); err == nil {
+			c.mu.Lock()
+			delete(c.knownDirs, dirPath)
+			c.mu.Unlock()
+			sent++
+		}
+		time.Sleep(30 * time.Millisecond)
+	}
+
+	// 2. Envoyer les suppressions de fichiers
+	for _, filePath := range deletedFiles {
+		change := FileChange{
+			FileName: filePath,
+			Op:       "remove",
+			IsDir:    false,
+			Origin:   "client",
+		}
+		if err := c.WriteJSONSafe(change); err == nil {
+			c.mu.Lock()
+			delete(c.knownFiles, filePath)
+			c.mu.Unlock()
+			sent++
+		}
+		time.Sleep(30 * time.Millisecond)
+	}
+
+	// 3. Envoyer les nouveaux dossiers (triés par profondeur)
+	sortedDirs := getSortedKeysByDepth(newDirs)
+	for _, dirPath := range sortedDirs {
+		change := FileChange{
+			FileName: dirPath,
+			Op:       "mkdir",
+			IsDir:    true,
+			Origin:   "client",
+		}
+		if err := c.WriteJSONSafe(change); err == nil {
 			c.mu.Lock()
 			c.knownDirs[dirPath] = time.Now()
 			c.mu.Unlock()
 			sent++
-			time.Sleep(150 * time.Millisecond)
-			
-			if i > 0 && i%5 == 0 {
-				time.Sleep(200 * time.Millisecond)
-			}
 		}
+		time.Sleep(30 * time.Millisecond)
 	}
-	
-	for i, filePath := range getSortedKeys(allFiles) {
-		modTime := allFiles[filePath]
-		
-		c.mu.Lock()
-		lastMod, known := c.knownFiles[filePath]
-		shouldSend := !known || modTime.After(lastMod)
-		c.mu.Unlock()
-		
-		if shouldSend {
-			fullPath := filepath.Join(c.localDir, filepath.FromSlash(filePath))
-			data, err := os.ReadFile(fullPath)
-			if err != nil {
-				continue
-			}
-			
-			change := FileChange{
-				FileName: filePath,
-				Op:       "write",
-				Content:  base64.StdEncoding.EncodeToString(data),
-				IsDir:    false,
-				Origin:   "client",
-			}
-			c.ws.WriteJSON(change)
-			c.mu.Lock()
-			c.knownFiles[filePath] = modTime
-			c.mu.Unlock()
+
+	// 4. Envoyer les nouveaux fichiers
+	for i, filePath := range newFiles {
+		if err := c.sendFile(filePath); err == nil {
 			sent++
-			time.Sleep(150 * time.Millisecond)
-			
-			if i > 0 && i%10 == 0 {
-				time.Sleep(200 * time.Millisecond)
+		}
+		// Rate limiting pour éviter la surcharge
+		if i > 0 && i%10 == 0 {
+			time.Sleep(50 * time.Millisecond)
+		} else {
+			time.Sleep(20 * time.Millisecond)
+		}
+	}
+
+	// 5. Envoyer les fichiers modifiés
+	for i, filePath := range modifiedFiles {
+		if err := c.sendFile(filePath); err == nil {
+			sent++
+		}
+		// Rate limiting
+		if i > 0 && i%10 == 0 {
+			time.Sleep(50 * time.Millisecond)
+		} else {
+			time.Sleep(20 * time.Millisecond)
+		}
+	}
+
+	c.isProcessing = false
+	addLog(fmt.Sprintf("✅ %d opérations envoyées avec succès", sent))
+}
+
+// sendFile envoie un fichier au serveur
+func (c *Client) sendFile(relPath string) error {
+	fullPath := filepath.Join(c.localDir, filepath.FromSlash(relPath))
+
+	data, err := os.ReadFile(fullPath)
+	if err != nil {
+		return err
+	}
+
+	info, _ := os.Stat(fullPath)
+
+	change := FileChange{
+		FileName: relPath,
+		Op:       "write",
+		Content:  base64.StdEncoding.EncodeToString(data),
+		IsDir:    false,
+		Origin:   "client",
+	}
+
+	if err := c.WriteJSONSafe(change); err != nil {
+		return err
+	}
+
+	c.mu.Lock()
+	if info != nil {
+		c.knownFiles[relPath] = info.ModTime()
+	} else {
+		c.knownFiles[relPath] = time.Now()
+	}
+	c.mu.Unlock()
+
+	return nil
+}
+
+// getServerState récupère l'état connu des fichiers (basé sur le cache local)
+func (c *Client) getServerState() (map[string]time.Time, map[string]time.Time) {
+	serverFiles := make(map[string]time.Time)
+	serverDirs := make(map[string]time.Time)
+
+	c.mu.Lock()
+	for k, v := range c.knownFiles {
+		serverFiles[k] = v
+	}
+	for k, v := range c.knownDirs {
+		serverDirs[k] = v
+	}
+	c.mu.Unlock()
+
+	return serverFiles, serverDirs
+}
+
+// getSortedKeysByDepth trie les chemins par profondeur (moins profond d'abord)
+func getSortedKeysByDepth(paths []string) []string {
+	if len(paths) == 0 {
+		return paths
+	}
+
+	// Trier par nombre de séparateurs
+	sorted := make([]string, len(paths))
+	copy(sorted, paths)
+
+	for i := 0; i < len(sorted)-1; i++ {
+		for j := i + 1; j < len(sorted); j++ {
+			depthI := strings.Count(sorted[i], "/")
+			depthJ := strings.Count(sorted[j], "/")
+			if depthI > depthJ {
+				sorted[i], sorted[j] = sorted[j], sorted[i]
 			}
 		}
 	}
-	
-	time.Sleep(300 * time.Millisecond)
-	
-	c.isProcessing = false
-	addLog(fmt.Sprintf("✅ %d opérations envoyées", sent))
+
+	return sorted
 }
 
 func (c *Client) ClearLocalFiles() {
@@ -330,22 +491,28 @@ func (c *Client) handleLocalEvent(event fsnotify.Event) {
 		return
 	}
 	relPath = filepath.ToSlash(relPath)
-	
+
+	// Vérifier le filtrage par chemin/dossier
+	filterConfig := GetFilterConfig()
+	if filterConfig.Filters.Path.ShouldFilter(relPath) {
+		return // Fichier/dossier filtré
+	}
+
 	c.mu.Lock()
 	if until, exists := c.skipNext[relPath]; exists && time.Now().Before(until) {
 		c.mu.Unlock()
 		return
 	}
 	c.mu.Unlock()
-	
-	time.Sleep(100 * time.Millisecond)
-	
+
+	time.Sleep(50 * time.Millisecond)
+
 	if event.Op&fsnotify.Create != 0 || event.Op&fsnotify.Write != 0 {
 		info, err := os.Stat(event.Name)
 		if err != nil {
 			return
 		}
-		
+
 		if info.IsDir() {
 			change := FileChange{
 				FileName: relPath,
@@ -353,9 +520,15 @@ func (c *Client) handleLocalEvent(event fsnotify.Event) {
 				IsDir:    true,
 				Origin:   "client",
 			}
-			c.ws.WriteJSON(change)
+			c.WriteJSONSafe(change)
 		} else {
-			time.Sleep(100 * time.Millisecond)
+			// Vérifier le filtrage par extension et taille
+			if filterConfig.ShouldFilterFile(relPath, info.Size(), false) {
+				addLog(fmt.Sprintf("🔍 Fichier ignoré (filtre): %s", relPath))
+				return
+			}
+
+			time.Sleep(50 * time.Millisecond)
 			data, err := os.ReadFile(event.Name)
 			if err != nil {
 				return
@@ -367,9 +540,9 @@ func (c *Client) handleLocalEvent(event fsnotify.Event) {
 				IsDir:    false,
 				Origin:   "client",
 			}
-			c.ws.WriteJSON(change)
+			c.WriteJSONSafe(change)
 		}
-		time.Sleep(150 * time.Millisecond)
+		time.Sleep(50 * time.Millisecond)
 	}
 }
 
@@ -412,19 +585,19 @@ func (c *Client) periodicScanner() {
 				return
 			}
 
-			time.Sleep(200 * time.Millisecond)
+			time.Sleep(100 * time.Millisecond)
 
 			currentFiles := make(map[string]time.Time)
 			currentDirs := make(map[string]time.Time)
 			c.scanCurrentState(c.localDir, "", currentFiles, currentDirs)
 
 			c.mu.Lock()
-			
+
 			dirsRemoved := 0
 			dirsCreated := 0
 			filesModified := 0
 			filesRemoved := 0
-			
+
 			for oldDir := range c.lastDirs {
 				if until, exists := c.skipNext[oldDir]; exists && time.Now().Before(until) {
 					continue
@@ -436,10 +609,12 @@ func (c *Client) periodicScanner() {
 						IsDir:    true,
 						Origin:   "client",
 					}
-					c.ws.WriteJSON(change)
+					c.mu.Unlock()
+					c.WriteJSONSafe(change)
+					c.mu.Lock()
 					delete(c.knownDirs, oldDir)
 					dirsRemoved++
-					time.Sleep(150 * time.Millisecond)
+					time.Sleep(50 * time.Millisecond)
 				}
 			}
 
@@ -454,10 +629,12 @@ func (c *Client) periodicScanner() {
 						IsDir:    true,
 						Origin:   "client",
 					}
-					c.ws.WriteJSON(change)
+					c.mu.Unlock()
+					c.WriteJSONSafe(change)
+					c.mu.Lock()
 					c.knownDirs[newDir] = modTime
 					dirsCreated++
-					time.Sleep(150 * time.Millisecond)
+					time.Sleep(50 * time.Millisecond)
 				}
 			}
 
@@ -468,8 +645,10 @@ func (c *Client) periodicScanner() {
 
 				lastMod, known := c.lastState[name]
 				if !known || modTime.After(lastMod) {
-					time.Sleep(50 * time.Millisecond)
+					c.mu.Unlock()
+					time.Sleep(30 * time.Millisecond)
 					c.sendFileNow(name)
+					c.mu.Lock()
 					filesModified++
 				}
 			}
@@ -480,24 +659,26 @@ func (c *Client) periodicScanner() {
 						delete(c.skipNext, oldFile)
 						continue
 					}
-					
+
 					change := FileChange{
 						FileName: oldFile,
 						Op:       "remove",
 						IsDir:    false,
 						Origin:   "client",
 					}
-					c.ws.WriteJSON(change)
+					c.mu.Unlock()
+					c.WriteJSONSafe(change)
+					c.mu.Lock()
 					delete(c.knownFiles, oldFile)
 					filesRemoved++
-					time.Sleep(150 * time.Millisecond)
+					time.Sleep(50 * time.Millisecond)
 				}
 			}
 
 			c.lastState = currentFiles
 			c.lastDirs = currentDirs
 			c.mu.Unlock()
-			
+
 			if dirsRemoved > 0 || dirsCreated > 0 || filesModified > 0 || filesRemoved > 0 {
 				var changes []string
 				if dirsCreated > 0 {
@@ -548,14 +729,14 @@ func (c *Client) scanCurrentState(basePath, relPath string, files map[string]tim
 
 func (c *Client) sendFileNow(relPath string) {
 	fullPath := filepath.Join(c.localDir, filepath.FromSlash(relPath))
-	
-	time.Sleep(50 * time.Millisecond)
-	
+
+	time.Sleep(30 * time.Millisecond)
+
 	data, err := os.ReadFile(fullPath)
 	if err != nil {
 		return
 	}
-	
+
 	change := FileChange{
 		FileName: relPath,
 		Op:       "write",
@@ -563,8 +744,10 @@ func (c *Client) sendFileNow(relPath string) {
 		IsDir:    false,
 		Origin:   "client",
 	}
-	
-	c.ws.WriteJSON(change)
+
+	c.WriteJSONSafe(change)
+	c.mu.Lock()
 	c.knownFiles[relPath] = time.Now()
-	time.Sleep(150 * time.Millisecond)
+	c.mu.Unlock()
+	time.Sleep(50 * time.Millisecond)
 } 

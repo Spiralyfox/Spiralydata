@@ -390,6 +390,44 @@ func showUserConnected(win fyne.Window, serverAddr, hostID, syncDir string, clie
 		),
 	)
 	
+	// Bouton configuration sync
+	syncConfigBtn := widget.NewButton("⚙️ Config Sync", func() {
+		ShowSyncConfigDialog(win, GetSyncConfig(), func(config *SyncConfig) {
+			SetSyncConfig(config)
+			SaveSyncConfigToFile(config)
+			addLog("✅ Configuration sync sauvegardée")
+		})
+	})
+	syncConfigBtn.Importance = widget.LowImportance
+	
+	// Bouton conflits
+	conflictBtn := widget.NewButton("⚠️ Conflits (0)", func() {
+		ShowConflictListDialog(win, GetConflictManager())
+	})
+	conflictBtn.Importance = widget.LowImportance
+	
+	// Mettre à jour le compteur de conflits
+	go func() {
+		for {
+			time.Sleep(2 * time.Second)
+			count := GetConflictManager().ConflictCount()
+			if count > 0 {
+				conflictBtn.SetText(fmt.Sprintf("⚠️ Conflits (%d)", count))
+				conflictBtn.Importance = widget.DangerImportance
+			} else {
+				conflictBtn.SetText("⚠️ Conflits (0)")
+				conflictBtn.Importance = widget.LowImportance
+			}
+			conflictBtn.Refresh()
+		}
+	}()
+	
+	// Bouton file de transfert
+	queueBtn := widget.NewButton("📤 File transfert", func() {
+		ShowTransferQueueDialog(win, GetTransferQueue())
+	})
+	queueBtn.Importance = widget.LowImportance
+	
 	manualControlsContainer := container.NewVBox(
 		widget.NewSeparator(),
 		widget.NewLabelWithStyle("🎮 Contrôles Manuels", fyne.TextAlignCenter, fyne.TextStyle{Bold: true}),
@@ -413,6 +451,20 @@ func showUserConnected(win fyne.Window, serverAddr, hostID, syncDir string, clie
 		container.NewCenter(
 			container.NewMax(
 				container.NewPadded(clearBtn),
+			),
+		),
+		container.NewCenter(
+			container.NewHBox(
+				syncConfigBtn,
+				conflictBtn,
+				queueBtn,
+			),
+		),
+		container.NewCenter(
+			container.NewHBox(
+				CreatePerformanceButton(win),
+				CreatePerformanceSettingsButton(win),
+				CreateSecurityButton(win),
 			),
 		),
 	)

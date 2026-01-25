@@ -16,6 +16,7 @@ import (
 
 type Client struct {
 	ws                 *websocket.Conn
+	wsMu               sync.Mutex // Mutex pour les écritures WebSocket
 	localDir           string
 	mu                 sync.Mutex
 	skipNext           map[string]time.Time
@@ -41,6 +42,7 @@ type Client struct {
 	ctx                context.Context
 	cancel             context.CancelFunc
 	watcherDone        chan struct{}
+	opQueue            chan func() // Queue d'opérations pour éviter les race conditions
 }
 
 func StartClientGUI(serverAddr, hostID, syncDir string, stopAnimation, connectionSuccess *bool, loadingLabel, statusLabel, infoLabel *widget.Label, client **Client) {
@@ -185,7 +187,11 @@ func StartClientGUI(serverAddr, hostID, syncDir string, stopAnimation, connectio
 		ctx:                ctx,
 		cancel:             cancel,
 		watcherDone:        make(chan struct{}),
+		opQueue:            make(chan func(), 100),
 	}
+
+	// Démarrer le worker pour traiter les opérations
+	go (*client).processOperationQueue()
 
 	addLog("🔍 Scan initial du dossier local...")
 	time.Sleep(200 * time.Millisecond)
@@ -217,8 +223,16 @@ func StartClientGUI(serverAddr, hostID, syncDir string, stopAnimation, connectio
 
 		var treeItem FileTreeItemMessage
 		if err := json.Unmarshal(rawMsg, &treeItem); err == nil {
-			if (treeItem.Type == "file_tree_item" || treeItem.Type == "file_tree_complete") && (*client).explorerActive {
-				(*client).treeItemsChan <- treeItem
+			if treeItem.Type == "file_tree_item" || treeItem.Type == "file_tree_complete" {
+				// Toujours essayer d'envoyer si le channel existe
+				if (*client).treeItemsChan != nil {
+					select {
+					case (*client).treeItemsChan <- treeItem:
+						// Message envoyé
+					default:
+						// Channel plein ou fermé, ignorer
+					}
+				}
 				continue
 			}
 		}
@@ -269,31 +283,63 @@ func StartClientGUI(serverAddr, hostID, syncDir string, stopAnimation, connectio
 
 func (c *Client) cleanup() {
 	c.shouldExit = true
-	
+
 	if c.cancel != nil {
 		c.cancel()
 	}
-	
+
 	if c.watcherActive {
 		select {
 		case <-c.watcherDone:
 		case <-time.After(2 * time.Second):
 		}
 	}
-	
+
 	if c.explorerActive {
 		c.explorerActive = false
 		if c.treeItemsChan != nil {
 			close(c.treeItemsChan)
 		}
 	}
-	
+
 	if c.downloadActive {
 		c.downloadActive = false
 		if c.downloadChan != nil {
 			close(c.downloadChan)
 		}
 	}
+
+	// Fermer la queue d'opérations
+	if c.opQueue != nil {
+		close(c.opQueue)
+	}
+}
+
+// processOperationQueue traite les opérations en arrière-plan
+func (c *Client) processOperationQueue() {
+	for op := range c.opQueue {
+		if c.shouldExit {
+			return
+		}
+		op()
+	}
+}
+
+// WriteJSONSafe envoie un message JSON de manière thread-safe
+func (c *Client) WriteJSONSafe(v interface{}) error {
+	c.wsMu.Lock()
+	defer c.wsMu.Unlock()
+
+	if c.ws == nil {
+		return fmt.Errorf("connexion WebSocket fermée")
+	}
+
+	// Définir un timeout pour l'écriture
+	c.ws.SetWriteDeadline(time.Now().Add(10 * time.Second))
+	err := c.ws.WriteJSON(v)
+	c.ws.SetWriteDeadline(time.Time{}) // Reset le deadline
+
+	return err
 }
 
 func (c *Client) ToggleAutoSync() {
