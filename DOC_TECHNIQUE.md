@@ -11,9 +11,9 @@
 Spiralydata utilise une architecture client-serveur basée sur WebSocket pour la synchronisation en temps réel.
 
 ```
-┌─────────────────┐         WebSocket          ┌─────────────────┐
+┌─────────────────┐         WebSocket            ┌─────────────────┐
 │                 │ ◄──────────────────────────► │                 │
-│   HÔTE          │         JSON/Base64         │   CLIENT 1      │
+│   HÔTE          │         JSON/Base64          │   CLIENT 1      │
 │   (Serveur)     │ ◄──────────────────────────► │                 │
 │                 │                              └─────────────────┘
 │   Port: 1212    │ ◄──────────────────────────► ┌─────────────────┐
@@ -232,9 +232,9 @@ type Server struct {
 Spiralydata uses a client-server architecture based on WebSocket for real-time synchronization.
 
 ```
-┌─────────────────┐         WebSocket          ┌─────────────────┐
+┌─────────────────┐         WebSocket            ┌─────────────────┐
 │                 │ ◄──────────────────────────► │                 │
-│   HOST          │         JSON/Base64         │   CLIENT 1      │
+│   HOST          │         JSON/Base64          │   CLIENT 1      │
 │   (Server)      │ ◄──────────────────────────► │                 │
 │                 │                              └─────────────────┘
 │   Port: 1212    │ ◄──────────────────────────► ┌─────────────────┐
