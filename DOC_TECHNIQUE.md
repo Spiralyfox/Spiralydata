@@ -1,420 +1,443 @@
-# Documentation Technique - SpiralData
+# 📚 Documentation Technique - Spiralydata
 
-## Architecture
+---
 
-### Vue d'ensemble
+## 🇫🇷 Français
 
-SpiralData est une application Go utilisant Fyne pour l'interface graphique et WebSocket (gorilla/websocket) pour la communication réseau.
+### 🏗️ Architecture
 
-| Composant | Description |
+#### Vue d'ensemble
+
+Spiralydata utilise une architecture client-serveur basée sur WebSocket pour la synchronisation en temps réel.
+
+```
+┌─────────────────┐         WebSocket          ┌─────────────────┐
+│                 │ ◄──────────────────────────► │                 │
+│   HÔTE          │         JSON/Base64         │   CLIENT 1      │
+│   (Serveur)     │ ◄──────────────────────────► │                 │
+│                 │                              └─────────────────┘
+│   Port: 1212    │ ◄──────────────────────────► ┌─────────────────┐
+│                 │                              │   CLIENT 2      │
+└─────────────────┘                              └─────────────────┘
+```
+
+#### Composants principaux
+
+| Fichier | Rôle |
+|---------|------|
+| `main.go` | Point d'entrée, initialisation |
+| `gui.go` | Interface graphique principale |
+| `gui_user.go` | Interface client |
+| `server.go` | Serveur WebSocket et gestion des connexions |
+| `server_handlers.go` | Gestionnaires de messages serveur |
+| `client.go` | Client WebSocket et réception des messages |
+| `client_operations.go` | Opérations client (envoi, réception, backup) |
+| `client_connect.go` | Interface de connexion client |
+| `file_explorer.go` | Explorateur de fichiers distant |
+| `types.go` | Structures de données partagées |
+| `config.go` | Gestion de la configuration |
+| `themes.go` | Thèmes de l'interface |
+| `logging.go` | Système de logs |
+| `utils.go` | Fonctions utilitaires |
+
+### 📡 Protocole de communication
+
+#### Format des messages
+
+Tous les messages sont au format JSON via WebSocket.
+
+**Structure FileChange :**
+```json
+{
+  "filename": "chemin/vers/fichier.txt",
+  "op": "create|write|remove|mkdir",
+  "content": "base64_encoded_content",
+  "origin": "client|server",
+  "is_dir": false
+}
+```
+
+**Opérations disponibles :**
+| Opération | Description |
 |-----------|-------------|
-| **Server** | Gère les connexions WebSocket, diffuse les changements |
-| **Client** | Se connecte au serveur, synchronise les fichiers locaux |
-| **GUI** | Interface Fyne avec thèmes, logs, et contrôles |
+| `create` | Création d'un nouveau fichier |
+| `write` | Modification d'un fichier existant |
+| `remove` | Suppression d'un fichier ou dossier |
+| `mkdir` | Création d'un dossier |
 
----
+#### Types de requêtes
 
-## Structure des fichiers
+| Type | Direction | Description |
+|------|-----------|-------------|
+| `auth_request` | Client → Serveur | Authentification avec l'identifiant hôte |
+| `auth_success` | Serveur → Client | Confirmation de connexion |
+| `auth_failed` | Serveur → Client | Échec d'authentification |
+| `request_all_files` | Client → Serveur | Demande de tous les fichiers |
+| `request_file_tree` | Client → Serveur | Demande de l'arborescence |
+| `file_tree_item` | Serveur → Client | Élément de l'arborescence |
+| `file_tree_complete` | Serveur → Client | Fin de l'arborescence |
+| `download_request` | Client → Serveur | Demande de téléchargement |
 
-### Fichiers principaux
+### 🔄 Flux de synchronisation
 
-| Fichier | Rôle | Fonctions principales |
-|---------|------|----------------------|
-| `gui.go` | Point d'entrée, interface principale | `main()`, `StartGUI()`, `createMainMenu()` |
-| `server.go` | Serveur WebSocket | `NewServer()`, `Start()`, `Stop()`, `handleWS()` |
-| `client.go` | Client WebSocket | `StartClientGUI()`, `ToggleAutoSync()`, `applyChange()` |
-| `client_operations.go` | Opérations fichiers côté client | `PullAllFromServer()`, `PushLocalChanges()`, `watchRecursive()` |
-| `client_connect.go` | Interface connexion client | `showUserConnecting()`, `showUserConnected()` |
-
-### Fichiers de synchronisation
-
-| Fichier | Rôle | Fonctions principales |
-|---------|------|----------------------|
-| `sync_modes.go` | Modes de sync, file de transfert, pending actions | `NewTransferQueue()`, `NewPendingActionsManager()`, `CompressData()` |
-| `sync_ui.go` | Dialogues de configuration sync | `ShowSyncConfigDialog()`, `ShowTransferQueueDialog()`, `ShowConflictDialog()` |
-| `server_handlers.go` | Gestion fichiers côté serveur | `sendAllFilesAndDirs()`, `applyChange()`, `watchRecursive()` |
-
-### Fichiers d'interface
-
-| Fichier | Rôle | Fonctions principales |
-|---------|------|----------------------|
-| `file_explorer.go` | Explorateur de fichiers | `NewFileExplorer()`, `Show()`, `loadFileTree()`, `downloadSelected()` |
-| `explorer_utils.go` | Utilitaires explorateur | `formatSize()`, `getFileIcon()`, `sortItems()` |
-| `filters.go` | Système de filtrage | `NewFilterConfig()`, `ShouldFilterFile()` |
-| `filters_ui.go` | Interface filtres | `ShowFilterDialog()` |
-| `preview.go` | Prévisualisation fichiers | `PreviewManager`, `CanPreview()`, `GetPreview()` |
-| `preview_ui.go` | Interface prévisualisation | `PreviewPanel`, `ShowPreview()` |
-
-### Fichiers de configuration et sécurité
-
-| Fichier | Rôle | Fonctions principales |
-|---------|------|----------------------|
-| `config.go` | Gestion configuration | `LoadConfig()`, `SaveConfig()`, `SaveSyncConfigToFile()` |
-| `security.go` | Sécurité et whitelist | `IPWhitelist`, `AddIP()`, `IsAllowed()` |
-| `security_ui.go` | Interface sécurité | Composants UI pour la sécurité |
-| `access_control.go` | Contrôle d'accès | Gestion des permissions |
-| `encryption.go` | Chiffrement | Fonctions de chiffrement des données |
-| `audit.go` | Journalisation audit | Traçabilité des actions |
-
-### Fichiers utilitaires
-
-| Fichier | Rôle | Fonctions principales |
-|---------|------|----------------------|
-| `types.go` | Types de données partagés | `FileChange`, `AuthRequest`, `AuthResponse` |
-| `utils.go` | Utilitaires divers | `FormatFileSize()`, `getExecutableDir()`, `copyDirRecursive()` |
-| `themes.go` | Gestion des thèmes | `SetTheme()`, `ThemeDark`, `ThemeLight` |
-| `ui_components.go` | Composants UI réutilisables | `StatusBar`, `StatCard`, `ShortcutHandler` |
-| `logging.go` | Système de logs | Gestion avancée des logs |
-| `network.go` | Utilitaires réseau | Fonctions réseau |
-
-### Fichiers avancés
-
-| Fichier | Rôle | Fonctions principales |
-|---------|------|----------------------|
-| `conflicts.go` | Gestion des conflits | `ConflictManager`, `DetectConflict()`, `ResolveConflict()` |
-| `backup.go` | Sauvegarde manuelle | `copyDirRecursive()`, `copyFile()` |
-| `performance.go` | Monitoring performance | Metriques et optimisation |
-| `performance_ui.go` | Interface performance | Affichage des métriques |
-| `monitoring_ui.go` | Interface monitoring | Surveillance système |
-| `collaboration.go` | Fonctions collaboratives | Multi-utilisateurs |
-
----
-
-## Structures de données
-
-### FileChange
-```go
-type FileChange struct {
-    FileName string  // Chemin relatif du fichier
-    Op       string  // Opération: "create", "write", "remove", "mkdir"
-    Content  string  // Contenu encodé en Base64
-    Origin   string  // "client" ou "server"
-    IsDir    bool    // True si c'est un dossier
-}
+#### Connexion initiale
+```
+1. Client se connecte au WebSocket
+2. Client envoie auth_request avec host_id
+3. Serveur vérifie l'identifiant
+4. Si OK: auth_success + envoi de tous les fichiers
+5. Si KO: auth_failed + fermeture connexion
 ```
 
-### PendingAction
-```go
-type PendingAction struct {
-    Type    ActionType  // ActionCreate, ActionModify, ActionDelete
-    Path    string      // Chemin du fichier
-    Size    int64       // Taille en bytes
-    ModTime time.Time   // Date de modification
-    IsDir   bool        // True si dossier
-    AddedAt time.Time   // Date d'ajout à la queue
-}
+#### Synchronisation temps réel
+```
+1. Modification détectée par fsnotify (watcher)
+2. Lecture du fichier modifié
+3. Encodage en Base64
+4. Envoi du FileChange via WebSocket
+5. Réception par les autres parties
+6. Décodage et écriture du fichier
 ```
 
-### TransferItem
-```go
-type TransferItem struct {
-    Path       string    // Chemin du fichier
-    Priority   int       // Priorité (plus bas = plus prioritaire)
-    Size       int64     // Taille
-    IsDir      bool      // Est un dossier
-    Operation  string    // Type d'opération
-    Content    string    // Contenu Base64
-    Compressed bool      // Compressé ou non
-    Retries    int       // Nombre de tentatives
-    AddedAt    time.Time // Date d'ajout
-}
+#### Processus de Backup
+```
+1. Scan du serveur (request_file_tree)
+2. Comptage des éléments attendus
+3. Demande de tous les fichiers (request_all_files)
+4. Attente de la réception (monitoring du dossier local)
+5. Copie du dossier local vers Backup_Spiralydata_DATE
 ```
 
-### SyncConfig
-```go
-type SyncConfig struct {
-    Mode               SyncMode        // Mode de synchronisation
-    CompressionEnabled bool            // Compression activée
-    CompressionLevel   int             // Niveau 1-9
-    BandwidthLimit     int64           // Limite en bytes/sec
-    RetryCount         int             // Nombre de retry
-    RetryDelay         time.Duration   // Délai entre retry
-    ScheduleEnabled    bool            // Planification activée
-    ScheduleInterval   time.Duration   // Intervalle de sync
-    ConflictStrategy   ConflictStrategy // Stratégie de conflit
-}
-```
-
----
-
-## Flux de synchronisation
-
-### Connexion Client
-
-```
-1. Client → Server : Connexion WebSocket
-2. Client → Server : AuthRequest { Type: "auth_request", HostID: "..." }
-3. Server → Client : AuthResponse { Type: "auth_success" } ou { Type: "auth_failed" }
-4. Server → Client : Envoi de tous les fichiers existants
-5. Client : scanInitial() - Scan du dossier local
-6. Client : ScanAndDetectDifferences() - Détection des différences
-7. Client : watchRecursive() - Surveillance des changements
-```
-
-### Synchronisation automatique (Sync Auto ON)
-
-```
-Modification locale détectée
-    ↓
-watchRecursive() → handleLocalEvent()
-    ↓
-Envoi immédiat au serveur (FileChange)
-    ↓
-Server → broadcast() à tous les autres clients
-```
-
-### Synchronisation manuelle (Sync Auto OFF)
-
-```
-Modification locale détectée
-    ↓
-watchRecursive() → TrackLocalChange()
-    ↓
-Ajout à PendingActions
-    ↓
-(Utilisateur clique "ENVOYER")
-    ↓
-PushLocalChanges() → Envoi au serveur
-    ↓
-GetPendingActions().Clear()
-```
-
----
-
-## API WebSocket
-
-### Messages Client → Server
-
-| Type | Description | Données |
-|------|-------------|---------|
-| `auth_request` | Authentification | `{ type, host_id }` |
-| `request_all_files` | Demande tous les fichiers | `{ type }` |
-| `request_file_tree` | Demande l'arborescence | `{ type }` |
-| `download_request` | Téléchargement sélectif | `{ type, items: [] }` |
-| `FileChange` | Modification fichier | `{ filename, op, content, origin, is_dir }` |
+### 📂 Gestion des fichiers
 
-### Messages Server → Client
+#### Watcher (fsnotify)
 
-| Type | Description | Données |
-|------|-------------|---------|
-| `auth_success` | Authentification réussie | `{ type, message }` |
-| `auth_failed` | Authentification échouée | `{ type, message }` |
-| `file_tree_item` | Élément d'arborescence | `{ type, path, name, is_dir }` |
-| `file_tree_complete` | Fin d'arborescence | `{ type }` |
-| `FileChange` | Modification fichier | `{ filename, op, content, origin, is_dir }` |
+Le système surveille récursivement le dossier synchronisé :
+- Détection des créations, modifications, suppressions
+- Filtrage des événements en double
+- Délai anti-rebond pour éviter les envois multiples
 
----
+#### Encodage des fichiers
 
-## Filtres
-
-### Types de filtres
+- Les fichiers sont lus en binaire
+- Encodés en Base64 pour le transport JSON
+- Décodés à la réception avant écriture
 
-| Filtre | Description | Exemple |
-|--------|-------------|---------|
-| Extension | Exclure par extension | `.tmp`, `.log`, `.bak` |
-| Path | Exclure par chemin | `node_modules`, `.git`, `cache/` |
-| Size | Exclure par taille | Min: 0, Max: 100MB |
+#### Gestion des conflits
 
-### Vérification
+- Timestamps comparés pour déterminer la version la plus récente
+- Fichiers `.conflict` créés en cas de conflit non résolu
 
-```go
-filterConfig := GetFilterConfig()
-if filterConfig.ShouldFilterFile(path, size, false) {
-    // Fichier filtré, ignorer
-    return
-}
-```
+### 🎨 Interface graphique
 
----
+#### Framework utilisé
+- **Fyne v2** : Toolkit Go multiplateforme
 
-## Gestion des conflits
+#### Thèmes disponibles
+| Thème | Description |
+|-------|-------------|
+| Clair | Fond blanc, texte sombre |
+| Sombre | Fond sombre, texte clair |
+| Personnalisé | Couleurs configurables |
 
-### Stratégies disponibles
+#### Composants UI
+- `StatusBar` : Barre de statut avec indicateur de connexion
+- `LogPanel` : Panneau de logs scrollable
+- `FileExplorer` : Explorateur de fichiers avec navigation
+- `ControlButtons` : Boutons d'action (Envoyer, Recevoir, etc.)
 
-| Stratégie | Description |
-|-----------|-------------|
-| `ConflictAskUser` | Demander à l'utilisateur |
-| `ConflictKeepNewest` | Garder le plus récent (par date) |
-| `ConflictKeepLocal` | Toujours garder la version locale |
-| `ConflictKeepRemote` | Toujours garder la version serveur |
-| `ConflictKeepBoth` | Créer deux copies |
-| `ConflictAutoMerge` | Fusion automatique (si possible) |
+### 🔐 Sécurité
 
----
+#### Authentification
+- Identifiant hôte généré aléatoirement (6 chiffres)
+- Validation obligatoire à la connexion
+- Connexion refusée si identifiant incorrect
 
-## Compression
+#### Limitations
+- Pas de chiffrement des données en transit (WebSocket non-TLS)
+- Recommandé pour usage en réseau local uniquement
 
-### Activation
+### ⚡ Performance
 
-La compression gzip peut etre activee dans la configuration sync pour reduire la taille des transferts.
+#### Optimisations
+- Délais entre les envois pour éviter la surcharge
+- Buffers WebSocket augmentés (10MB)
+- Traitement asynchrone des fichiers
+- Compression implicite via Base64
 
-```go
-compressed, err := CompressData(data, config.CompressionLevel)
-encoded := base64.StdEncoding.EncodeToString(compressed)
-```
+#### Limites recommandées
+| Paramètre | Valeur recommandée |
+|-----------|-------------------|
+| Taille max fichier | 50 MB |
+| Nombre de fichiers | < 1000 |
+| Clients simultanés | < 10 |
 
-### Decompression
+### 🛠️ Compilation
 
-```go
-decoded, _ := base64.StdEncoding.DecodeString(encoded)
-data, err := DecompressData(decoded)
-```
-
----
-
-## Backup
-
-### Fonction de backup
-
-Le bouton "Telecharger une backup" permet de copier tous les fichiers synchronises vers un dossier externe.
-
-```go
-// Copie recursive d'un dossier
-func copyDirRecursive(src, dst string) error
-func copyFile(src, dst string) error
-```
-
-### Utilisation
-- Disponible dans les modes Host et User
-- Ouvre un dialogue de selection de dossier
-- Copie tous les fichiers du dossier de synchronisation
-
----
-
-## Deconnexion
-
-### Comportement
-
-La deconnexion retourne au menu principal sans fermer l'application :
-- Le client ferme la connexion WebSocket
-- Les ressources sont liberees (cleanup)
-- L'interface revient a showUserSetup() ou showHostSetup()
-
----
-
-## Sécurité
-
-### Whitelist IP
-
-```go
-whitelist := GetIPWhitelist()
-whitelist.Enable()
-whitelist.AddIP("192.168.1.100")
-whitelist.AddIP("10.0.0.0/8")  // Plage CIDR
-
-if !whitelist.IsAllowed(clientIP) {
-    // Refuser la connexion
-}
-```
-
----
-
-## Compilation
-
-### Prérequis
-
-- Go 1.21+
-- Fyne v2
-- gorilla/websocket
-- fsnotify
-
-### Commandes
-
-```bash
-# Installation des dépendances
-go mod tidy
-
-# Compilation simple
-go build -o spiralydata
-
-# Compilation avec icône (Windows)
-# Voir section "Icône de l'exécutable"
-```
-
-### Icône de l'exécutable (Windows)
-
-1. Placer `Spiralylogo.png` dans le dossier source
-2. Installer rsrc : `go install github.com/akavel/rsrc@latest`
-3. Créer un fichier `app.manifest` :
-```xml
-<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
-<assembly xmlns="urn:schemas-microsoft-com:asm.v1" manifestVersion="1.0">
-  <assemblyIdentity version="1.0.0.0" processorArchitecture="*" name="Spiralydata" type="win32"/>
-</assembly>
-```
-4. Convertir l'icône : Convertir PNG en ICO
-5. Générer le fichier ressource : `rsrc -manifest app.manifest -ico Spiralylogo.ico -o rsrc.syso`
-6. Compiler : `go build -ldflags="-H windowsgui" -o spiralydata.exe`
-
----
-
-## Variables globales importantes
-
-| Variable | Type | Description |
-|----------|------|-------------|
-| `myApp` | `fyne.App` | Instance de l'application |
-| `myWindow` | `fyne.Window` | Fenêtre principale |
-| `logWidget` | `*widget.Entry` | Widget des logs |
-| `statusBar` | `*StatusBar` | Barre de statut |
-| `globalSyncConfig` | `*SyncConfig` | Configuration sync globale |
-| `globalTransferQueue` | `*TransferQueue` | File de transfert globale |
-| `globalPendingActions` | `*PendingActionsManager` | Actions en attente |
-
----
-
-## Logs
-
-### Ajout de logs
-
-```go
-addLog("Message de log")
-addLog(fmt.Sprintf("Message avec valeur: %d", value))
-```
-
-### Emojis standards utilisés
-
-| Emoji | Signification |
-|-------|---------------|
-| ✅ | Succès |
-| ❌ | Erreur |
-| ⚠️ | Avertissement |
-| 📤 | Envoi |
-| 📥 | Réception |
-| 🔍 | Scan/Recherche |
-| 📁 | Dossier |
-| 📄 | Fichier |
-| 🔌 | Connexion |
-| 👀 | Surveillance |
-
----
-
-## Performance
-
-### Optimisations implémentées
-
-- Buffer de logs pour éviter les freezes UI
-- Rate limiting sur les envois de fichiers
-- Délais entre opérations pour éviter la surcharge
-- Queue d'opérations pour éviter les race conditions
-- Mutex pour la thread-safety
-
-### Paramètres de timing
-
-| Opération | Délai |
-|-----------|-------|
-| Entre fichiers (batch) | 20-50ms |
-| Entre lots de 10 fichiers | 50-200ms |
-| Refresh logs | 150ms |
-| Scan périodique | 3s |
-
----
-
-## Dépendances
-
+#### Dépendances
 ```go
 require (
-    fyne.io/fyne/v2 v2.x.x
-    github.com/gorilla/websocket v1.x.x
-    github.com/fsnotify/fsnotify v1.x.x
+    fyne.io/fyne/v2 v2.7.2
+    github.com/gorilla/websocket v1.5.3
+    github.com/fsnotify/fsnotify v1.7.0
 )
+```
+
+#### Commandes de build
+```bash
+# Windows (sans console)
+go build -ldflags "-H=windowsgui" -o spiralydata.exe .
+
+# Linux
+go build -o spiralydata .
+
+# Avec debug
+go build -o spiralydata_debug.exe .
+```
+
+### 📊 Structures de données
+
+#### Client
+```go
+type Client struct {
+    ws              *websocket.Conn  // Connexion WebSocket
+    localDir        string           // Dossier local
+    isProcessing    bool             // Opération en cours
+    autoSync        bool             // Mode auto activé
+    downloadActive  bool             // Téléchargement en cours
+    downloadChan    chan FileChange  // Canal de téléchargement
+    explorerActive  bool             // Explorateur actif
+    treeItemsChan   chan FileTreeItemMessage
+}
+```
+
+#### Server
+```go
+type Server struct {
+    HostID    string                       // Identifiant hôte
+    WatchDir  string                       // Dossier surveillé
+    Clients   map[*websocket.Conn]string   // Clients connectés
+    Upgrader  websocket.Upgrader           // Upgrader HTTP→WS
+}
+```
+
+---
+
+## 🇬🇧 English
+
+### 🏗️ Architecture
+
+#### Overview
+
+Spiralydata uses a client-server architecture based on WebSocket for real-time synchronization.
+
+```
+┌─────────────────┐         WebSocket          ┌─────────────────┐
+│                 │ ◄──────────────────────────► │                 │
+│   HOST          │         JSON/Base64         │   CLIENT 1      │
+│   (Server)      │ ◄──────────────────────────► │                 │
+│                 │                              └─────────────────┘
+│   Port: 1212    │ ◄──────────────────────────► ┌─────────────────┐
+│                 │                              │   CLIENT 2      │
+└─────────────────┘                              └─────────────────┘
+```
+
+#### Main Components
+
+| File | Role |
+|------|------|
+| `main.go` | Entry point, initialization |
+| `gui.go` | Main graphical interface |
+| `gui_user.go` | Client interface |
+| `server.go` | WebSocket server and connection management |
+| `server_handlers.go` | Server message handlers |
+| `client.go` | WebSocket client and message reception |
+| `client_operations.go` | Client operations (send, receive, backup) |
+| `client_connect.go` | Client connection interface |
+| `file_explorer.go` | Remote file explorer |
+| `types.go` | Shared data structures |
+| `config.go` | Configuration management |
+| `themes.go` | Interface themes |
+| `logging.go` | Logging system |
+| `utils.go` | Utility functions |
+
+### 📡 Communication Protocol
+
+#### Message Format
+
+All messages are in JSON format via WebSocket.
+
+**FileChange Structure:**
+```json
+{
+  "filename": "path/to/file.txt",
+  "op": "create|write|remove|mkdir",
+  "content": "base64_encoded_content",
+  "origin": "client|server",
+  "is_dir": false
+}
+```
+
+**Available Operations:**
+| Operation | Description |
+|-----------|-------------|
+| `create` | Create a new file |
+| `write` | Modify an existing file |
+| `remove` | Delete a file or folder |
+| `mkdir` | Create a folder |
+
+#### Request Types
+
+| Type | Direction | Description |
+|------|-----------|-------------|
+| `auth_request` | Client → Server | Authentication with host identifier |
+| `auth_success` | Server → Client | Connection confirmation |
+| `auth_failed` | Server → Client | Authentication failure |
+| `request_all_files` | Client → Server | Request all files |
+| `request_file_tree` | Client → Server | Request file tree |
+| `file_tree_item` | Server → Client | File tree element |
+| `file_tree_complete` | Server → Client | End of file tree |
+| `download_request` | Client → Server | Download request |
+
+### 🔄 Synchronization Flow
+
+#### Initial Connection
+```
+1. Client connects to WebSocket
+2. Client sends auth_request with host_id
+3. Server verifies identifier
+4. If OK: auth_success + send all files
+5. If KO: auth_failed + close connection
+```
+
+#### Real-time Synchronization
+```
+1. Change detected by fsnotify (watcher)
+2. Read modified file
+3. Encode to Base64
+4. Send FileChange via WebSocket
+5. Reception by other parties
+6. Decode and write file
+```
+
+#### Backup Process
+```
+1. Server scan (request_file_tree)
+2. Count expected elements
+3. Request all files (request_all_files)
+4. Wait for reception (local folder monitoring)
+5. Copy local folder to Backup_Spiralydata_DATE
+```
+
+### 📂 File Management
+
+#### Watcher (fsnotify)
+
+The system recursively monitors the synchronized folder:
+- Detection of creations, modifications, deletions
+- Filtering of duplicate events
+- Debounce delay to avoid multiple sends
+
+#### File Encoding
+
+- Files are read in binary
+- Encoded in Base64 for JSON transport
+- Decoded on reception before writing
+
+#### Conflict Management
+
+- Timestamps compared to determine most recent version
+- `.conflict` files created for unresolved conflicts
+
+### 🎨 Graphical Interface
+
+#### Framework Used
+- **Fyne v2**: Cross-platform Go toolkit
+
+#### Available Themes
+| Theme | Description |
+|-------|-------------|
+| Light | White background, dark text |
+| Dark | Dark background, light text |
+| Custom | Configurable colors |
+
+#### UI Components
+- `StatusBar`: Status bar with connection indicator
+- `LogPanel`: Scrollable log panel
+- `FileExplorer`: File explorer with navigation
+- `ControlButtons`: Action buttons (Send, Receive, etc.)
+
+### 🔐 Security
+
+#### Authentication
+- Randomly generated host identifier (6 digits)
+- Mandatory validation on connection
+- Connection refused if identifier incorrect
+
+#### Limitations
+- No data encryption in transit (non-TLS WebSocket)
+- Recommended for local network use only
+
+### ⚡ Performance
+
+#### Optimizations
+- Delays between sends to avoid overload
+- Increased WebSocket buffers (10MB)
+- Asynchronous file processing
+- Implicit compression via Base64
+
+#### Recommended Limits
+| Parameter | Recommended Value |
+|-----------|-------------------|
+| Max file size | 50 MB |
+| Number of files | < 1000 |
+| Simultaneous clients | < 10 |
+
+### 🛠️ Compilation
+
+#### Dependencies
+```go
+require (
+    fyne.io/fyne/v2 v2.7.2
+    github.com/gorilla/websocket v1.5.3
+    github.com/fsnotify/fsnotify v1.7.0
+)
+```
+
+#### Build Commands
+```bash
+# Windows (no console)
+go build -ldflags "-H=windowsgui" -o spiralydata.exe .
+
+# Linux
+go build -o spiralydata .
+
+# With debug
+go build -o spiralydata_debug.exe .
+```
+
+### 📊 Data Structures
+
+#### Client
+```go
+type Client struct {
+    ws              *websocket.Conn  // WebSocket connection
+    localDir        string           // Local folder
+    isProcessing    bool             // Operation in progress
+    autoSync        bool             // Auto mode enabled
+    downloadActive  bool             // Download in progress
+    downloadChan    chan FileChange  // Download channel
+    explorerActive  bool             // Explorer active
+    treeItemsChan   chan FileTreeItemMessage
+}
+```
+
+#### Server
+```go
+type Server struct {
+    HostID    string                       // Host identifier
+    WatchDir  string                       // Watched folder
+    Clients   map[*websocket.Conn]string   // Connected clients
+    Upgrader  websocket.Upgrader           // HTTP→WS Upgrader
+}
 ```

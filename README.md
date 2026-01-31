@@ -1,144 +1,225 @@
-# SpiralData
+# 🌀 Spiralydata
 
-Application de synchronisation de fichiers en temps reel entre un serveur (Host) et des clients (Users).
-
-## Presentation
-
-SpiralData permet de synchroniser des fichiers et dossiers entre plusieurs machines a travers le reseau. Un utilisateur demarre un serveur (mode Host) et d'autres utilisateurs se connectent en tant que clients (mode User) pour synchroniser leurs fichiers.
-
-## Modes de fonctionnement
-
-### Mode Host (Serveur)
-
-Le Host heberge les fichiers de reference. Il ecoute les connexions entrantes et synchronise les modifications avec tous les clients connectes.
-
-**Configuration requise :**
-- **Port** : Port TCP sur lequel le serveur ecoute (ex: 8080, 3000, etc.)
-- **ID Host** : Identifiant unique (6 caracteres minimum) que les clients devront fournir pour se connecter
-
-**Dossier de synchronisation :** Les fichiers sont stockes dans un dossier `Spiralydata` cree automatiquement a cote de l'executable.
-
-### Mode User (Client)
-
-Le User se connecte a un Host pour synchroniser ses fichiers.
-
-**Configuration requise :**
-- **Adresse du serveur** : IP et port du Host (ex: `192.168.1.100:8080` ou `monserveur.com:3000`)
-- **ID Host** : L'identifiant defini par le Host
-- **Dossier de synchronisation** : Dossier local ou les fichiers seront synchronises
-
-## Fonctionnalites
-
-### Synchronisation
-
-- **Sync Auto** : Active la synchronisation automatique en temps reel. Toute modification locale est immediatement envoyee au serveur, et les modifications du serveur sont appliquees automatiquement.
-
-- **Mode Manuel** : Permet de controler precisement quand synchroniser :
-  - **RECEVOIR** : Recupere tous les fichiers du serveur
-  - **ENVOYER** : Envoie toutes les modifications locales au serveur
-  - **VIDER LOCAL** : Supprime tous les fichiers locaux (utile pour repartir a zero)
-
-### File Transfert
-
-Affiche les actions en attente d'envoi au serveur. Seules les modifications manuelles locales (creation, modification, suppression de fichiers) sont listees ici. Les fichiers recus depuis le serveur ou telecharges via l'explorateur ne sont pas ajoutes a cette liste car ils sont deja synchronises.
-
-### Explorateur de fichiers
-
-Permet de naviguer dans l'arborescence des fichiers du serveur, de selectionner des fichiers specifiques a telecharger, et de previsualiser certains types de fichiers.
-
-### Telecharger une backup
-
-Disponible dans les modes Host et User, ce bouton permet de telecharger une copie complete de tous les fichiers synchronises vers un dossier de votre choix. Utile pour creer une sauvegarde locale de vos donnees.
-
-### Filtres
-
-Configurez des filtres pour exclure certains fichiers de la synchronisation :
-- **Par extension** : Exclure des types de fichiers (ex: `.tmp`, `.log`)
-- **Par chemin** : Exclure des dossiers ou fichiers specifiques
-- **Par taille** : Definir une taille minimale ou maximale
-
-### Securite (Host uniquement)
-
-- **Whitelist IP** : Restreindre les connexions a certaines adresses IP uniquement
-- Support des plages IP (ex: `192.168.1.0/24`)
-
-## Utilisation basique
-
-### Demarrer un serveur
-
-1. Lancer l'application
-2. Cliquer sur "Mode Hote (Host)"
-3. Entrer un port (ex: `8080`)
-4. Entrer un ID Host (ex: `monid123`)
-5. Cliquer sur "Demarrer le serveur"
-6. Communiquer l'adresse IP et l'ID aux utilisateurs
-
-### Se connecter en tant que client
-
-1. Lancer l'application
-2. Cliquer sur "Mode Utilisateur (User)"
-3. Entrer l'adresse du serveur (ex: `192.168.1.100:8080`)
-4. Entrer l'ID Host fourni par le serveur
-5. Choisir le dossier de synchronisation local
-6. Cliquer sur "Se connecter"
-
-### Synchroniser des fichiers
-
-**Avec Sync Auto :**
-- Activez le bouton "SYNC AUTO"
-- Toutes les modifications sont synchronisees automatiquement
-
-**En mode manuel :**
-1. Modifiez vos fichiers localement
-2. Les modifications apparaissent dans "File transfert"
-3. Cliquez sur "ENVOYER" pour envoyer au serveur
-4. Cliquez sur "RECEVOIR" pour recuperer les fichiers du serveur
-
-### Creer une backup
-
-1. Cliquez sur "Telecharger une backup"
-2. Choisissez le dossier de destination
-3. La copie complete des fichiers sera effectuee
-
-## Configuration
-
-### Fichier de configuration
-
-Les parametres sont sauvegardes dans `spiraly_config.json` a cote de l'executable.
-
-### Parametres disponibles
-
-- Theme (clair/sombre)
-- Taille de la fenetre
-- Barre de statut
-- Nombre maximum de logs
-
-## Raccourcis clavier
-
-- **Ctrl+T** : Changer de theme
-- **F11** : Plein ecran
-
-## Notes techniques
-
-- Communication via WebSocket pour les echanges en temps reel
-- Les fichiers sont encodes en Base64 pour le transfert
-- Support de la compression gzip pour les fichiers volumineux
-- Deconnexion: revient au menu principal sans fermer l'application
-
-## Depannage
-
-### "Connexion impossible"
-- Verifiez que le Host est bien demarre
-- Verifiez l'adresse IP et le port
-- Verifiez que le pare-feu autorise les connexions
-
-### "ID incorrect"
-- Verifiez l'ID Host aupres de l'administrateur du serveur
-
-### Fichiers non synchronises
-- Verifiez les filtres configures
-- Verifiez que vous n'etes pas en mode Sync Auto (les actions ne sont pas listees en Sync Auto car elles sont envoyees immediatement)
+**Synchronisation de fichiers en temps réel via WebSocket**
 
 ---
 
-Developpe avec Go et Fyne
+## 🇫🇷 Français
+
+### 📋 Description
+
+Spiralydata est une application de synchronisation de fichiers en temps réel entre un hôte (serveur) et plusieurs clients. Elle utilise WebSocket pour une communication bidirectionnelle instantanée et offre une interface graphique moderne et intuitive.
+
+### ✨ Fonctionnalités
+
+#### Synchronisation
+- **Temps réel** : Les modifications sont propagées instantanément
+- **Bidirectionnelle** : Hôte → Clients et Clients → Hôte
+- **Mode manuel ou automatique** : Choisissez votre mode de synchronisation
+- **Gestion des conflits** : Détection et résolution intelligente
+
+#### Interface utilisateur
+- **Thèmes** : Clair, sombre et personnalisé
+- **Explorateur de fichiers** : Navigation et téléchargement depuis le serveur
+- **Logs en temps réel** : Suivi détaillé des opérations
+- **Barre de statut** : État de connexion visible en permanence
+
+#### Fonctionnalités avancées
+- **Backup** : Sauvegarde complète du serveur vers un dossier local horodaté
+- **Filtres** : Inclusion/exclusion par extension ou pattern
+- **Prévisualisation** : Aperçu des fichiers texte et images
+- **Sécurité** : Authentification par identifiant hôte
+
+### 🚀 Installation
+
+#### Prérequis
+- Go 1.21 ou supérieur
+- Connexion réseau entre l'hôte et les clients
+
+#### Compilation
+
+**Windows :**
+```batch
+setup_windows.bat
+```
+
+**Linux :**
+```bash
+chmod +x setup_linux.sh
+./setup_linux.sh
+```
+
+#### Compilation manuelle
+```bash
+go mod init spiralydata
+go mod tidy
+go build -ldflags "-H=windowsgui" -o spiralydata.exe .
+```
+
+### 📖 Utilisation
+
+#### Mode Hôte (Serveur)
+1. Lancez l'application
+2. Cliquez sur **"Héberger"**
+3. Configurez le port (défaut: 1212)
+4. Notez l'**identifiant hôte** affiché
+5. Partagez votre **IP locale** et l'**identifiant** aux clients
+
+#### Mode Client (Utilisateur)
+1. Lancez l'application
+2. Cliquez sur **"Rejoindre"**
+3. Entrez l'**adresse IP** du serveur (ex: 192.168.1.10:1212)
+4. Entrez l'**identifiant hôte**
+5. Choisissez le **dossier de synchronisation**
+6. Cliquez sur **"Connexion"**
+
+#### Boutons de contrôle (Client)
+| Bouton | Description |
+|--------|-------------|
+| **ENVOYER** | Envoie vos fichiers locaux vers le serveur |
+| **RECEVOIR** | Récupère les fichiers du serveur |
+| **BACKUP** | Crée une sauvegarde complète dans un dossier `Backup_Spiralydata_DATE` |
+| **EXPLORER** | Ouvre l'explorateur de fichiers du serveur |
+
+### 📁 Structure des dossiers
+
+```
+Spiralydata/
+├── spiralydata.exe    # Exécutable
+├── Spiralydata/       # Dossier synchronisé (créé automatiquement)
+├── config.json        # Configuration sauvegardée
+└── logs/              # Journaux d'activité
+```
+
+### ⚙️ Configuration
+
+Le fichier `config.json` est créé automatiquement et contient :
+- Dernière adresse serveur utilisée
+- Dernier identifiant hôte
+- Dernier dossier de synchronisation
+- Thème sélectionné
+- Filtres configurés
+
+### 🔧 Résolution de problèmes
+
+| Problème | Solution |
+|----------|----------|
+| Connexion refusée | Vérifiez l'IP, le port et le pare-feu |
+| Identifiant incorrect | Vérifiez l'identifiant affiché côté hôte |
+| Fichiers non synchronisés | Vérifiez les filtres configurés |
+| Application qui freeze | Réduisez le nombre de fichiers ou augmentez les délais |
+
+### 📄 Licence
+
+Ce projet est sous licence MIT.
+
+---
+
+## 🇬🇧 English
+
+### 📋 Description
+
+Spiralydata is a real-time file synchronization application between a host (server) and multiple clients. It uses WebSocket for instant bidirectional communication and offers a modern, intuitive graphical interface.
+
+### ✨ Features
+
+#### Synchronization
+- **Real-time**: Changes are propagated instantly
+- **Bidirectional**: Host → Clients and Clients → Host
+- **Manual or automatic mode**: Choose your synchronization mode
+- **Conflict management**: Intelligent detection and resolution
+
+#### User Interface
+- **Themes**: Light, dark and custom
+- **File explorer**: Browse and download from server
+- **Real-time logs**: Detailed operation tracking
+- **Status bar**: Connection status always visible
+
+#### Advanced Features
+- **Backup**: Complete server backup to a local timestamped folder
+- **Filters**: Include/exclude by extension or pattern
+- **Preview**: Preview text files and images
+- **Security**: Authentication by host identifier
+
+### 🚀 Installation
+
+#### Prerequisites
+- Go 1.21 or higher
+- Network connection between host and clients
+
+#### Compilation
+
+**Windows:**
+```batch
+setup_windows.bat
+```
+
+**Linux:**
+```bash
+chmod +x setup_linux.sh
+./setup_linux.sh
+```
+
+#### Manual Compilation
+```bash
+go mod init spiralydata
+go mod tidy
+go build -ldflags "-H=windowsgui" -o spiralydata.exe .
+```
+
+### 📖 Usage
+
+#### Host Mode (Server)
+1. Launch the application
+2. Click **"Host"**
+3. Configure the port (default: 1212)
+4. Note the displayed **host identifier**
+5. Share your **local IP** and **identifier** with clients
+
+#### Client Mode (User)
+1. Launch the application
+2. Click **"Join"**
+3. Enter the server **IP address** (e.g.: 192.168.1.10:1212)
+4. Enter the **host identifier**
+5. Choose the **synchronization folder**
+6. Click **"Connect"**
+
+#### Control Buttons (Client)
+| Button | Description |
+|--------|-------------|
+| **SEND** | Sends your local files to the server |
+| **RECEIVE** | Retrieves files from the server |
+| **BACKUP** | Creates a complete backup in a `Backup_Spiralydata_DATE` folder |
+| **EXPLORE** | Opens the server file explorer |
+
+### 📁 Folder Structure
+
+```
+Spiralydata/
+├── spiralydata.exe    # Executable
+├── Spiralydata/       # Synchronized folder (created automatically)
+├── config.json        # Saved configuration
+└── logs/              # Activity logs
+```
+
+### ⚙️ Configuration
+
+The `config.json` file is created automatically and contains:
+- Last server address used
+- Last host identifier
+- Last synchronization folder
+- Selected theme
+- Configured filters
+
+### 🔧 Troubleshooting
+
+| Problem | Solution |
+|---------|----------|
+| Connection refused | Check IP, port and firewall |
+| Incorrect identifier | Check the identifier displayed on host side |
+| Files not synchronized | Check configured filters |
+| Application freezing | Reduce number of files or increase delays |
+
+### 📄 License
+
+This project is licensed under the MIT License.
